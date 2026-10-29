@@ -10,7 +10,10 @@ MAX_IMAGE_BYTES = 25 * 1024 * 1024
 
 
 class UrlError(ValueError):
-    pass
+    def __init__(self, message, *, http_status=None):
+        super().__init__(message)
+        self.code = message.replace(' ', '_')
+        self.http_status = http_status
 
 
 def resolve(url, hosts=(), *, webhook=False):
@@ -76,7 +79,7 @@ def download(url, destination: Path, hosts=()):
                 url = urljoin(url, location)
                 continue
             if response.status != 200:
-                raise UrlError('image download rejected')
+                raise UrlError('image download rejected', http_status=response.status)
             if int(response.headers.get('Content-Length', '0')) > MAX_IMAGE_BYTES:
                 raise UrlError('image too large')
             size = 0

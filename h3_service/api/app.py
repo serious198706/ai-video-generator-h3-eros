@@ -34,7 +34,9 @@ app = FastAPI(title='H3 GPU Worker', lifespan=lifespan, docs_url=None, redoc_url
 @app.get('/health')
 def health():
     worker = app.state.worker
-    return {'ok': True, 'model_ready': worker.ready, 'task_id': worker.current, 'error': worker.error}
+    return {'ok': True, 'model_ready': worker.ready, 'task_id': worker.current, 'error': worker.error,
+            'task_stage': worker.stage, 'received_messages': worker.received_messages,
+            'deleted_messages': worker.deleted_messages, 'last_task': worker.last_task}
 
 
 @app.get('/ready')

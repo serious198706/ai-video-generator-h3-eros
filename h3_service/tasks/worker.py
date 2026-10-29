@@ -4,6 +4,7 @@ import secrets
 import tempfile
 import threading
 import time
+import traceback
 from pathlib import Path
 from pydantic import ValidationError
 from h3_service.contracts.models import Message, frame_count, normalize_stored_request, validation_summary
@@ -19,6 +20,16 @@ LOG = logging.getLogger(__name__)
 TERMINAL = {'succeeded', 'failed'}
 
 
+def input_failure(exc):
+    result = {'type': type(exc).__name__, 'trace': [
+        {'file': Path(f.filename).name, 'function': f.name, 'line': f.lineno}
+        for f in traceback.extract_tb(exc.__traceback__)[-5:]]}
+    from h3_service.net.http import UrlError
+    if isinstance(exc, UrlError):
+        result.update(reason=exc.code, http_status=exc.http_status)
+    return json.dumps(result)
+
+
 class Worker:
     """One consumer, one task. On uncertain lease/status ownership, stop accepting work."""
     def __init__(self, settings, store, sqs, engine):
@@ -29,6 +40,10 @@ class Worker:
         self.error = None
         self.current = None
         self.thread = None
+        self.stage = 'initializing'
+        self.received_messages = 0
+        self.deleted_messages = 0
+        self.last_task = None
 
     def start(self):
         self.thread = threading.Thread(target=self.run, name='h3-worker', daemon=True)
@@ -50,16 +65,26 @@ class Worker:
             self.engine.preflight(self.cancelled)
             self.ready = True
             LOG.info('worker ready; model initialization complete; waiting for SQS tasks')
+            self.stage = 'idle'
+            last_idle = time.monotonic()
             while not self.stop.is_set():
                 try:
+                    polled = time.monotonic()
                     messages = self.sqs.receive_message(QueueUrl=self.settings.queue_url, MaxNumberOfMessages=1,
                         WaitTimeSeconds=20, VisibilityTimeout=self.settings.visibility,
                         MessageSystemAttributeNames=['ApproximateReceiveCount']).get('Messages', [])
+                    if messages:
+                        LOG.info('SQS receive complete count=%s elapsed_s=%.3f', len(messages), time.monotonic() - polled)
+                    elif time.monotonic() - last_idle >= 60:
+                        LOG.info('SQS polling active; no messages returned; received=%s deleted=%s',
+                                 self.received_messages, self.deleted_messages)
+                        last_idle = time.monotonic()
                     for message in messages:
                         if not self.stop.is_set():
                             self.handle(message)
                 except Exception as exc:
-                    LOG.error('task/queue failure details=%s; message retained', json.dumps(details(exc)))
+                    LOG.error('task/queue failure task=%s stage=%s details=%s; message retained',
+                              self.current, self.stage, json.dumps(details(exc)))
                     if not getattr(self.engine, 'healthy', True):
                         self.error = 'resident_engine_unavailable'
                         self.stop.set()
@@ -81,6 +106,12 @@ class Worker:
             raise LeaseLost('worker stopped or lease uncertain')
 
     def handle(self, message):
+        started = time.monotonic()
+        self.received_messages += 1
+        self.stage = 'validate_message'
+        LOG.info('SQS message received receive_count=%s body_bytes=%s; validating',
+                 message.get('Attributes', {}).get('ApproximateReceiveCount', '1'),
+                 len(message.get('Body', '').encode()))
         # Invalid envelopes are never silently deleted: SQS redrive policy must move them to a DLQ.
         try:
             envelope = Message.model_validate_json(message['Body'])
@@ -89,8 +120,14 @@ class Worker:
                       json.dumps(validation_summary(exc)))
             raise
         ident, request = envelope.task_id, envelope.request
+        LOG.info('task accepted task=%s resolution=%s duration=%s steps=%s audio=%s callback_requested=%s',
+                 ident, request.resolution, request.duration, request.steps, request.audio, bool(request.webhook_url))
         receipt = message['ReceiptHandle']
+        self.stage = 'read_status'
+        LOG.info('status read start task=%s', ident)
         state = self.store.read(ident)
+        LOG.info('status read complete task=%s status=%s stage=%s', ident,
+                 state.get('status') if state else 'missing', state.get('stage') if state else None)
         requested = request.model_dump()
         if state:
             try:
@@ -114,12 +151,17 @@ class Worker:
             with lock:
                 state.update(changes)
                 self.store.write(state)
+                self.stage = state.get('stage', self.stage)
+                LOG.info('status persisted task=%s status=%s stage=%s error=%s',
+                         ident, state['status'], state.get('stage'), state.get('error'))
 
         def heartbeat():
             while not done.wait(self.settings.heartbeat):
                 try:
                     self.sqs.change_message_visibility(QueueUrl=self.settings.queue_url, ReceiptHandle=receipt,
                                                        VisibilityTimeout=self.settings.visibility)
+                    LOG.info('SQS visibility renewed task=%s timeout_s=%s stage=%s',
+                             ident, self.settings.visibility, self.stage)
                     with lock:
                         if state['status'] not in TERMINAL:
                             self.store.write(state)
@@ -140,23 +182,41 @@ class Worker:
                 recover_upload = bool(state.get('upload_started')) or state.get('stage') == 'upload'
                 persist(status='pending', stage='recovery', upload_started=recover_upload)
                 stamp = fingerprint(requested, state['seed'])
+                if recover_upload:
+                    LOG.info('upload recovery check start task=%s', ident)
                 result = self.store.recover(ident, stamp) if recover_upload else None
                 if result is not None:
+                    LOG.info('upload recovery found existing video task=%s; generation skipped', ident)
                     persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
                 elif int(message.get('Attributes', {}).get('ApproximateReceiveCount', '1')) >= self.settings.max_receive:
+                    LOG.warning('task receive limit reached task=%s limit=%s; marking failed without generation', ident, self.settings.max_receive)
                     persist(status='failed', error='poisoned', stage='complete')
                 else:
                     self.execute(request, state, persist, stamp)
+            else:
+                LOG.info('terminal task redelivered task=%s status=%s; generation skipped', ident, state['status'])
             self.check()
             if state.get('callback') not in {'delivered', 'not_requested', 'exhausted'}:
+                LOG.info('callback processing start task=%s', ident)
                 outcome = notify(state, self.settings, self.cancelled)
                 persist(callback=outcome)
+                LOG.info('callback processing complete task=%s outcome=%s', ident, outcome)
+            else:
+                LOG.info('callback already resolved task=%s outcome=%s', ident, state['callback'])
             self.check()
+            self.stage = 'delete_message'
+            LOG.info('SQS delete start task=%s status=%s callback=%s', ident, state['status'], state.get('callback'))
             self.sqs.delete_message(QueueUrl=self.settings.queue_url, ReceiptHandle=receipt)
+            self.deleted_messages += 1
+            self.last_task = {'task_id': ident, 'status': state['status'], 'error': state.get('error'),
+                              'elapsed_s': round(time.monotonic() - started, 3)}
+            LOG.info('task complete; SQS message deleted task=%s status=%s error=%s elapsed_s=%.3f',
+                     ident, state['status'], state.get('error'), time.monotonic() - started)
         finally:
             done.set()
             heartbeat_thread.join(timeout=40)
             self.current = None
+            self.stage = 'idle' if self.ready else 'not_ready'
 
     def execute(self, request, state, persist, stamp):
         ident = state['task_id']
@@ -173,17 +233,25 @@ class Worker:
                     if url:
                         for attempt in range(3):
                             try:
+                                LOG.info('image download start task=%s frame=%s attempt=%s', ident,
+                                         'first' if path == first else 'last', attempt + 1)
+                                transfer_started = time.monotonic()
                                 download(url, path, self.settings.image_hosts)
+                                LOG.info('image download complete task=%s frame=%s elapsed_s=%.3f bytes=%s',
+                                         ident, 'first' if path == first else 'last', time.monotonic() - transfer_started, path.stat().st_size)
                                 break
-                            except Exception:
+                            except Exception as exc:
+                                LOG.warning('image download failed task=%s attempt=%s details=%s', ident, attempt + 1, input_failure(exc))
                                 self.check()
                                 if attempt == 2:
                                     raise
                                 self.cancelled.wait(2**attempt)
                 first, last, width, height = prepare(first, last, request.resolution, directory)
+                LOG.info('images prepared task=%s width=%s height=%s last_frame=%s', ident, width, height, bool(last))
             except LeaseLost:
                 raise
-            except Exception:
+            except Exception as exc:
+                LOG.error('task input/download failed task=%s details=%s; no generation', ident, input_failure(exc))
                 persist(status='failed', stage='complete', error='download_failed')
                 return
             frames = frame_count(request.duration)
@@ -192,8 +260,16 @@ class Worker:
                    'steps': request.steps, 'seed': state['seed'], 'audio': request.audio}
             persist(resolved={k: v for k, v in job.items() if k not in {'prompt', 'first', 'last'}})
             try:
-                output, metrics = self.engine.generate(job, directory, self.cancelled, lambda label: persist(stage=label))
+                LOG.info('generation start task=%s seed=%s frames=%s steps=%s', ident, state['seed'], frames, request.steps)
+                generation_started = time.monotonic()
+                def on_stage(label):
+                    LOG.info('generation stage start task=%s stage=%s', ident, label)
+                    persist(stage=label)
+                output, metrics = self.engine.generate(job, directory, self.cancelled, on_stage)
+                LOG.info('generation complete task=%s elapsed_s=%.3f timing=%s', ident,
+                         time.monotonic() - generation_started, json.dumps(metrics.get('timing', {})))
             except GenerationError as exc:
+                LOG.error('generation failed task=%s error=%s', ident, exc.code)
                 persist(status='failed', stage='complete', error=exc.code)
                 return
             self.check()
@@ -201,5 +277,9 @@ class Worker:
                       'actual_duration': frames / 24, 'audio_present': request.audio, 'model': metrics['model']}
             persist(stage='upload', timing=metrics['timing'], upload_started=True)
             # Transport exceptions propagate: leave message unacked for recovery/retry.
+            self.stage = 'upload'
+            upload_started = time.monotonic()
+            LOG.info('S3 video upload start task=%s', ident)
             self.store.upload(ident, output, result, stamp)
+            LOG.info('S3 video upload complete task=%s elapsed_s=%.3f', ident, time.monotonic() - upload_started)
             persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))

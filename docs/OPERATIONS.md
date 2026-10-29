@@ -108,6 +108,10 @@ S3 使用 KMS 时另需相应密钥权限。视频前缀可经 CDN 服务，状�
 
 ## 恢复与排错
 
+任务生命周期日志现覆盖：SQS 收到、校验/接单、读取及写入状态、首尾图下载及重试、画布处理、生成阶段/耗时、上传、回调每次 HTTP 响应、重复终态跳过、receive 上限失败、DeleteMessage 前后和任务总耗时。以 task_id 关联，不打印提示词、图片/回调 URL 或 receipt handle。空队列每约 60 秒输出轮询仍存活，长任务按续租间隔输出阶段。/health 增加 task_stage、received_messages、deleted_messages、last_task（终态/错误/耗时）。
+
+图片失败日志记录自有错误码、HTTP status（若有）、异常类型及不含输入的文件/函数/行号。无需重启模型即可诊断已失败任务：`bash check-download.sh --task-id REAL_TASK_ID`，它只读任务状态，临时下载并检查首尾图，不调用 GPU、不领取消息、不写 S3；输出不包含图片 URL 或提示词。
+
 AWS AccessDenied 排查运行 `./check-aws.sh --task-id REAL_TASK_ID`，必须提供现有 Lambda 返回的真实任务 ID；默认仅读取该状态对象，已完成任务才可加 `--video` 测试视频。无需重启 GPU 服务或加载模型，不领取/删除消息、不写对象。输出实际 bucket/prefix、操作名、HTTP 错误码和 request ID；使用当前 shell/.env 的凭证，若它与运行中 server 的环境已不同，结果不能代表旧进程。旧脚本默认生成随机 ID，其 403 不能证明真实已存在对象也不可读。
 
 S3 的 GetObject 请求在目标不存在且身份缺少 s3:ListBucket 时可能返回 403，而不是 404。H3 的终态/上传恢复检查不能把所有 403 当作不存在，否则真实权限故障会被掩盖。运行身份需要 S3 对象 GetObject/PutObject，以及使缺失对象可正确判定的桶 ListBucket 权限；若视频 prefix 改成 video/h3/，IAM/桶策略也需覆盖该前缀。STS/队列属性通过不代表这些 S3 权限已通过。参考 [S3 GetObject 权限与缺失对象响应](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)。
