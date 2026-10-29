@@ -22,12 +22,16 @@ def main():
     parser.add_argument('--prompt-file', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True, help='new output directory, not an MP4 filename')
     parser.add_argument('--load-probes', action='store_true', help='also load both models as separate preflight probes (loads twice)')
+    parser.add_argument('--resident', action='store_true', help='use the server resident model lifecycle')
+    parser.add_argument('--runs', type=int, default=1, help='consecutive generations; >1 requires --resident')
     parser.add_argument('--duration', type=float, default=5)
     parser.add_argument('--resolution', default='540p')
     parser.add_argument('--steps', type=int, default=6)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--audio', action='store_true')
     args = parser.parse_args()
+    if args.runs < 1 or (args.runs > 1 and not args.resident):
+        parser.error('--runs must be positive; multiple runs require --resident')
     total_started = time.monotonic()
 
     def log(message, *, error=False):
@@ -41,6 +45,7 @@ def main():
     report = {'model': MODEL_ID, 'base_revision': BASE_REVISION, 'diffusers_revision': DIFFUSERS_REVISION,
               'python': platform.python_version(), 'status': 'running'}
     output_created = False
+    engine = None
     try:
         log('H3 benchmark starting')
         log(f'Model: {MODEL_ID}')
@@ -57,7 +62,11 @@ def main():
         if output.suffix.lower() == '.mp4':
             log('Note: --output is a directory; the video will be written to ' + str(output / 'output.mp4'))
         settings = Settings()
-        engine = Engine(settings, progress=log)
+        if args.resident:
+            from h3_service.infer.resident import ResidentEngine
+            engine = ResidentEngine(settings, progress=log)
+        else:
+            engine = Engine(settings, progress=log)
         cancelled = threading.Event()
         report.update(image_sha256=sha256(image), prompt_sha256=sha256(prompt_file))
 
@@ -88,7 +97,14 @@ def main():
             stage_name, stage_started = stage, now
             log(f'Stage started: {stage} (includes cold model loading)')
 
-        video_path, metrics = engine.generate(job, output, cancelled, on_stage)
+        measurements = []
+        for run in range(args.runs):
+            run_directory = output if args.runs == 1 else output / f'run-{run + 1:02d}'
+            run_directory.mkdir(exist_ok=True, mode=0o700)
+            log(f'Generation {run + 1}/{args.runs}; resident={args.resident}')
+            video_path, metrics = engine.generate(job, run_directory, cancelled, on_stage)
+            measurements.append(metrics)
+            report['runs'] = measurements
         if stage_name is not None:
             log(f'Stage finished: {stage_name} ({time.monotonic() - stage_started:.1f}s)')
         for phase, timing in metrics.get('timing', {}).items():
@@ -105,6 +121,10 @@ def main():
         log(f'Benchmark failed: {type(exc).__name__}; partial artifacts retained in {output}', error=True)
         return 1
     finally:
+        if engine is not None:
+            close = getattr(engine, 'close', None)
+            if close:
+                close()
         report['total_s'] = time.monotonic() - total_started
         # The temporary prompt and embedding files are not part of the benchmark artifact.
         if output_created:

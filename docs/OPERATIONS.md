@@ -2,6 +2,21 @@
 
 ## 当前运行方式
 
+更新：server 现在默认 `H3_MODEL_LIFETIME=resident`。父进程仅负责接单，专用推理子进程常驻 conditioner 和 Eros generator 的 CPU 权重；启动完成全量哈希、加载、一次 Eros 转换和两侧 GPU 放置探测后 ready。每单只做 CPU/GPU 搬运、编码和推理，不再从磁盘重新加载模型或重新转换 Eros。两套未量化模型不会同时放上 GPU。下面关于逐阶段子进程/每单冷加载的说明仅适用于显式 `H3_MODEL_LIFETIME=cold` 和未加 `--resident` 的 benchmark。
+
+常驻启动要求有效可用 RAM 至少 160 GiB，可用 `H3_RESIDENT_MIN_RAM_GIB` 调整；加载后/每单开始前保留至少 16 GiB 有效可用量。有效可用量取主机 MemAvailable 与 cgroup 剩余配额加 inactive_file 可回收缓存的较小值，这是容量估计，不保证未来无 OOM。内存不足明确失败，不自动退到冷加载。已提供的 Vast 容器上限约 342 GiB、当前约 180 GiB，不能按宿主机 1 TiB 预算。
+
+常驻推理发生错误、超时或失去续租时，整个模型进程回收，server 退出 ready 并停止消费；当前任务依既有终态/重投规则处理。恢复需要重启 worker，届时重新加载一次。不会继续复用 CUDA 错误后的进程。
+
+连续两单复用验收入口（新输出目录，每次成片保存在 run-01/run-02）：
+
+```bash
+python benchmark.py --resident --runs 2 --image /workspace/test1.jpg \
+  --prompt-file /workspace/prompt.txt --output /workspace/h3-resident-check
+```
+
+该入口和 server 复用同一个 ResidentEngine，第二单应无模型读盘/权重转换阶段；仍会记录 GPU 搬运与回 CPU 耗时。首次算子初始化仍可能使第一单更慢。该模式会在 benchmark 结束时关闭常驻进程；server 则保留至停止或异常。
+
 worker 父进程不导入 torch。启动时核对固定依赖和文件哈希，分别启动 conditioner/generator probe，把模型实际放上 GPU 后退出；通过后开始 SQS 消费。每单也是先 conditioner 子进程、后 generator 子进程，阶段退出后 CUDA context 随进程释放。
 
 与设计中的后续常驻优化相比，首版降低了两份模型同时占主机内存的需求，但增加了每单磁盘读取和转换时间。实际 RAM、VRAM、速度尚待 GPU 测量。默认要求空闲显存至少 88 GiB，可由 `H3_MIN_FREE_GIB` 调整；调小不代表较小显卡已经受支持。

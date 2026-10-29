@@ -28,8 +28,12 @@ class Settings:
     stall_seconds: int = field(default_factory=lambda: int(os.getenv('H3_STALL_SECONDS', '2700')))
     phase_timeout: int = field(default_factory=lambda: int(os.getenv('H3_PHASE_TIMEOUT', '3600')))
     min_free_gib: float = field(default_factory=lambda: float(os.getenv('H3_MIN_FREE_GIB', '88')))
+    resident_min_ram_gib: float = field(default_factory=lambda: float(os.getenv('H3_RESIDENT_MIN_RAM_GIB', '160')))
+    model_lifetime: str = field(default_factory=lambda: os.getenv('H3_MODEL_LIFETIME', 'resident'))
 
     def validate_cloud(self):
+        if self.model_lifetime not in {'resident', 'cold'}:
+            raise ValueError('H3_MODEL_LIFETIME must be resident or cold')
         if not self.bucket or not self.queue_url or not self.public_base.startswith('https://'):
             raise ValueError('H3_S3_BUCKET, H3_QUEUE_URL and HTTPS H3_PUBLIC_BASE_URL are required')
         if not self.prefix.strip('/'):

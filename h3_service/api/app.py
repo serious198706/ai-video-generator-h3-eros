@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from h3_service.config import Settings
 from h3_service.infer.engine import Engine
+from h3_service.infer.resident import ResidentEngine
 from h3_service.media.cloud import Store, clients
 from h3_service.tasks.worker import Worker
 
@@ -17,7 +18,8 @@ async def lifespan(app):
     with (settings.work_dir / 'worker.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         s3, sqs = clients(settings)
-        worker = Worker(settings, Store(settings, s3), sqs, Engine(settings))
+        engine_class = ResidentEngine if settings.model_lifetime == 'resident' else Engine
+        worker = Worker(settings, Store(settings, s3), sqs, engine_class(settings))
         app.state.worker = worker
         worker.start()
         try:

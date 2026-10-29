@@ -53,12 +53,21 @@ class Worker:
                             self.handle(message)
                 except Exception as exc:
                     LOG.error('task/queue failure type=%s; message retained', type(exc).__name__)
+                    if not getattr(self.engine, 'healthy', True):
+                        self.error = 'resident_engine_unavailable'
+                        self.stop.set()
                     self.stop.wait(5)
+                if not getattr(self.engine, 'healthy', True):
+                    self.error = 'resident_engine_unavailable'
+                    self.stop.set()
         except Exception as exc:
             self.error = type(exc).__name__
             LOG.error('worker initialization failed type=%s', self.error)
         finally:
             self.ready = False
+            close = getattr(self.engine, 'close', None)
+            if close:
+                close()
 
     def check(self):
         if self.cancelled.is_set():

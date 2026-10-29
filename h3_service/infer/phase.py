@@ -16,7 +16,7 @@ def validate_wire(embeds, tags):
         raise ValueError('invalid conditioner output')
 
 
-def execute(mode, job, settings, progress=None):
+def execute(mode, job, settings, progress=None, loaded_pipe=None):
     emit = progress or (lambda message: None)
     emit('importing runtime dependencies')
     if mode == 'probe-runtime':
@@ -41,8 +41,10 @@ def execute(mode, job, settings, progress=None):
     torch.cuda.reset_peak_memory_stats()
     conditioner = mode in ('condition', 'probe-condition')
     started = time.monotonic()
-    pipe = load_pipeline(settings.model_dir, conditioner=conditioner, progress=emit)
-    if not conditioner:
+    pipe = loaded_pipe
+    if pipe is None:
+        pipe = load_pipeline(settings.model_dir, conditioner=conditioner, progress=emit)
+    if not conditioner and loaded_pipe is None:
         emit('converting Eros weights on CPU')
         report = apply_eros(pipe.transformer, settings.eros_file, progress=emit)
         if job:
@@ -86,7 +88,7 @@ def execute(mode, job, settings, progress=None):
             export_video(state.get('videos')[0], state.get('audio')[0].cpu(), state.get('sampling_rate'),
                          directory / 'output.mp4', width, height, num_frames, job['audio'])
     torch.cuda.synchronize()
-    return {'load_s': loaded, 'compute_export_s': time.monotonic() - started,
+    return {'load_s': loaded if loaded_pipe is None else 0.0, 'transfer_s': loaded if loaded_pipe is not None else 0.0, 'compute_export_s': time.monotonic() - started,
             'peak_allocated_gib': torch.cuda.max_memory_allocated() / 1024**3,
             'peak_reserved_gib': torch.cuda.max_memory_reserved() / 1024**3}
 
