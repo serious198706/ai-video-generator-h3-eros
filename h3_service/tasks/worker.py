@@ -41,6 +41,10 @@ class Worker:
 
     def run(self):
         try:
+            # Also protect direct uvicorn launches that bypass start.sh.
+            from h3_service.aws_setup import verify_credentials, verify_queue
+            verify_credentials(self.settings.region)
+            verify_queue(self.settings, self.sqs)
             self.engine.preflight(self.cancelled)
             self.ready = True
             while not self.stop.is_set():

@@ -2,7 +2,7 @@
 
 ## 当前运行方式
 
-更新：server 现在默认 `H3_MODEL_LIFETIME=resident`。父进程仅负责接单，专用推理子进程常驻 conditioner 和 Eros generator 的 CPU 权重；启动完成全量哈希、加载、一次 Eros 转换和两侧 GPU 放置探测后 ready。每单只做 CPU/GPU 搬运、编码和推理，不再从磁盘重新加载模型或重新转换 Eros。两套未量化模型不会同时放上 GPU。下面关于逐阶段子进程/每单冷加载的说明仅适用于显式 `H3_MODEL_LIFETIME=cold` 和未加 `--resident` 的 benchmark。
+更新：server 现在默认 `H3_MODEL_LIFETIME=resident`。父进程仅负责接单，专用推理子进程常驻 conditioner 和 Eros generator 的 CPU 权重；启动完成权重校验、加载、按需 Eros 转换和两侧 GPU 放置探测后 ready。每单只做 CPU/GPU 搬运、编码和推理，不再从磁盘重新加载模型或重新转换 Eros。两套未量化模型不会同时放上 GPU。下面关于逐阶段子进程/每单冷加载的说明仅适用于显式 `H3_MODEL_LIFETIME=cold` 和未加 `--resident` 的 benchmark。
 
 常驻启动要求有效可用 RAM 至少 160 GiB，可用 `H3_RESIDENT_MIN_RAM_GIB` 调整；加载后/每单开始前保留至少 16 GiB 有效可用量。有效可用量取主机 MemAvailable 与 cgroup 剩余配额加 inactive_file 可回收缓存的较小值，这是容量估计，不保证未来无 OOM。内存不足明确失败，不自动退到冷加载。已提供的 Vast 容器上限约 342 GiB、当前约 180 GiB，不能按宿主机 1 TiB 预算。
 
@@ -33,6 +33,12 @@ worker 父进程不导入 torch。启动时核对固定依赖和文件哈希，�
 `deploy.sh` 创建独立 `.venv`，安装候选固定 GPU 依赖、下载指定 revisions、校验 Eros SHA-256 并生成基础文件哈希清单。`start.sh` 加载可选 `.env`，默认只监听 `127.0.0.1:8001`，单个 uvicorn worker。同一数据目录通过 flock 防止重复启动；跨机器仍必须确保只有一个 worker 消费该队列。
 
 必填运行环境：`H3_S3_BUCKET`、`H3_QUEUE_URL`、`H3_PUBLIC_BASE_URL`。CDN base 是桶映射根路径，不要重复加 `video/h3`。凭证由 IAM role 或标准 AWS 环境注入；回调密钥通过 `H3_WEBHOOK_SECRET` 注入。配置变量说明在 `.env.example`，不含真实凭证。
+
+`deploy.sh` 默认调用 `setup-aws.sh`：缺少凭证时隐藏输入，先验证 STS，再原子保存到本机 `.env`（0600，已忽略 Git）。已有 AWS_PROFILE/角色继续使用其 provider，不复制临时角色凭证。设置 `H3_AWS_SETUP=0` 可跳过部署时配置。非交互部署可注入标准 AWS 环境变量；显式配置流程会保存静态 key/token，临时 token 到期后必须更新。
+
+`./setup-aws.sh` 现在只配置并保存，不启动或重启 GPU 服务；`./setup-aws.sh --force` 用于轮换。之后 `./start.sh` 自动读取保存值。start 和直接 uvicorn 的 worker 都会在模型预加载前验证 STS 与队列 GetQueueAttributes；该检查不消费消息。缺权限、队列 region 错误等可提前失败。STS/队列检查不代表 S3 读写权限全部验证。
+
+Vast 没有 EC2 instance role，交互配置入口默认禁用 EC2 metadata 凭证探测；显式设置 `AWS_EC2_METADATA_DISABLED=false` 可覆盖。修改准则：云端 worker 在昂贵的模型预加载之前验证 AWS 身份，避免加载十几分钟后才发现缺少凭证。
 
 模型下载约涉及 140+ GB 的基础组件及约 40 GB Eros，磁盘还需为缓存、输出和安装预留余量。部署脚本不自动清理既有模型。重新下载会重建本地组件路径与 manifest；移动模型目录后须重建该清单。
 
@@ -86,7 +92,7 @@ API Gateway 将 `/v1/generate` 和 `/v1/tasks/{id}` 代理给 Lambda。身份认
 | 角色 | 必需权限 |
 | --- | --- |
 | Lambda | 对 H3 队列 SendMessage；启用积压限制时 GetQueueAttributes；对 H3 status 前缀 GetObject/PutObject；Lambda 常规日志权限 |
-| Worker | 对 H3 队列 ReceiveMessage/DeleteMessage/ChangeMessageVisibility；对 H3 前缀 GetObject/PutObject 和 multipart 上传所需权限 |
+| Worker | 对 H3 队列 GetQueueAttributes/ReceiveMessage/DeleteMessage/ChangeMessageVisibility；对 H3 前缀 GetObject/PutObject 和 multipart 上传所需权限 |
 
 S3 使用 KMS 时另需相应密钥权限。视频前缀可经 CDN 服务，状态对象保持私有，经 Lambda 查询；不要把包含业务请求的状态对象暴露到公共 CDN。
 
@@ -111,3 +117,13 @@ python -m unittest discover -s tests -v
 ```
 
 测试中的 fake engine 只存在于 `tests/`，不会上传或消费真实 AWS 资源。真实媒体封装测试需要 ffprobe；缺少时会明确 skip。完整 GPU 验收必须另跑 benchmark。
+
+## 重复部署和重启成本
+
+- `git pull` 不会主动重启运行中的 server；Python 已加载的业务代码需要重启后才更新。不要对 GPU 服务使用 `--reload`。
+- requirements 内容未变化且存在部署标记时，deploy 复用 venv，跳过 pip install；仍执行 pip check。需要修复依赖时 `H3_REINSTALL=1 ./deploy.sh`。
+- 已有固定模型和 manifest 验证通过时不再走 HF 下载/重建清单。
+- `H3_VERIFY_MODE=cached` 默认首次完整 SHA-256，随后只在预期哈希、路径、设备/inode、尺寸、mtime/ctime 全部一致时复用校验结果。变化或缓存丢失会重新校验；这是本机可信磁盘的启动优化，不是对恶意篡改者的真实性证明。`H3_VERIFY_MODE=full` 强制逐次全量 SHA-256。
+- Resident 默认 `H3_CONVERTED_CACHE=1`。首次把转换好的完整 Transformer 保存到 models/converted，另需约 62 GiB 磁盘和一次写入/校验耗时；其后直接加载该 Diffusers checkpoint，省去原始 Transformer 加载后的 Eros 逐张量转换。基线/模型/转换格式版本不匹配或文件校验失败会重建。修改转换算法必须提升 converter 版本。
+- 模型和缓存目录需要持久存储。新机器首次部署仍有下载、验证、转换成本；复制缓存后文件元信息变化会触发哈希验证。
+- 重启仍要加载两套模型并探测 GPU 放置，不能保证零冷启动或承诺具体秒数。业务代码与 GPU 常驻进程跨重启复用尚未实现。

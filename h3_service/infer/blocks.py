@@ -40,7 +40,7 @@ class GeneratorBlocks(SequentialPipelineBlocks):
         return _generation_outputs()
 
 
-def load_pipeline(model_dir, *, conditioner, progress=None):
+def load_pipeline(model_dir, *, conditioner, progress=None, transformer_path=None):
     import torch
     emit = progress or (lambda message: None)
     # Same explicit extension as upstream Space; short clips remain GPU-unvalidated.
@@ -51,7 +51,10 @@ def load_pipeline(model_dir, *, conditioner, progress=None):
     for component in blocks.expected_components:
         if component.default_creation_method == 'from_pretrained':
             emit(f'loading component from disk: {component.name}')
-            pipe.load_components(names=[component.name], dtype=torch.bfloat16, local_files_only=True)
+            options = {}
+            if component.name == 'transformer' and transformer_path is not None:
+                options = {'pretrained_model_name_or_path': str(transformer_path), 'subfolder': None}
+            pipe.load_components(names=[component.name], dtype=torch.bfloat16, local_files_only=True, **options)
     # Upstream load_components logs and continues on individual load errors.
     missing = [c.name for c in blocks.expected_components if getattr(pipe, c.name, None) is None]
     if missing:

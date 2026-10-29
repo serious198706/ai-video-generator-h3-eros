@@ -105,7 +105,10 @@ class Engine:
         context = nullcontext(diagnostic_dir) if diagnostic_dir is not None else tempfile.TemporaryDirectory(dir=self.settings.work_dir)
         with context as temp:
             self.phase('probe-runtime', Path(temp), cancelled)
-            verify(self.settings, progress=self.progress, cancelled=cancelled)
+            if self.settings.verify_mode not in {'cached', 'full'}:
+                raise ValueError('H3_VERIFY_MODE must be cached or full')
+            verify(self.settings, progress=self.progress, cancelled=cancelled,
+                   cache_path=self.settings.work_dir / 'weight-verification.json' if self.settings.verify_mode == 'cached' else None)
             if probe_models:
                 for mode in ('probe-condition', 'probe-generate'):
                     self.phase(mode, Path(temp), cancelled)

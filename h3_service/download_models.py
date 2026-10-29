@@ -4,13 +4,20 @@ import sys
 from pathlib import Path
 from h3_service.config import Settings
 from h3_service.infer.manifest import (
-    BASE_REPO, BASE_REVISION, EROS_REPO, EROS_REVISION, EROS_NAME, EROS_SHA256, COMPONENTS, sha256,
+    BASE_REPO, BASE_REVISION, EROS_REPO, EROS_REVISION, EROS_NAME, EROS_SHA256, COMPONENTS, sha256, verify,
 )
 
 
 def main():
     from huggingface_hub import snapshot_download, hf_hub_download
     settings = Settings()
+    if (settings.model_dir / 'h3-manifest.json').exists():
+        try:
+            verify(settings, progress=print, cache_path=settings.work_dir / 'weight-verification.json')
+            print('Pinned models already present and verified; no download needed.')
+            return 0
+        except (OSError, ValueError):
+            print('Existing model verification failed; repairing the pinned snapshot.')
     settings.model_dir.mkdir(parents=True, exist_ok=True)
     snapshot_download(BASE_REPO, revision=BASE_REVISION, local_dir=settings.model_dir,
                       allow_patterns=['modular_model_index.json', 'LICENSE', *[c + '/*' for c in COMPONENTS]])

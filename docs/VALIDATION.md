@@ -37,4 +37,10 @@ server 默认使用 ResidentEngine，新增本地测试验证连续两单只加�
 
 改造后共 51 项本地测试全部通过，无跳过；compileall 与 git diff --check 通过。
 
+## AWS 凭证启动检查
+
+补充隐藏输入、进程环境传递和 STS 验证，密钥不持久化；验证缺少凭证时 worker 在模型加载前退出。增加已有凭证链、非交互缺失、临时 token 清理及 fail-fast 测试，真实 AWS 身份和 SQS/S3 权限仍由目标机器实际验证。
+
+后续按用户明确授权，setup/deploy 已改为 STS 验证后保存本机 .env（0600）。增加持久化保留业务配置、特殊字符 shell 引用、旧 token 清理、验证失败不覆盖、权重校验缓存失效、转换 checkpoint 复用和损坏重建测试。另增加队列检查失败时模型不加载测试。GPU 上的 checkpoint 保存/重新加载时长和数值一致性尚需实际验证。
+
 benchmark 提供 `--resident --runs 2` 与 server 相同生命周期的验收入口。现有阶段冷加载路径仍可显式使用。GPU 实际显存回落、CPU RSS 稳定性和连续两单成片需在 Vast 主机验证。

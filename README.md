@@ -8,6 +8,7 @@
 - [实现与验收计划](docs/IMPLEMENTATION.md)：阶段产物、测试、GPU 验证和上线门槛。
 - [运行与接入](docs/OPERATIONS.md)：实际脚本、配置、接口、故障恢复和部署包。
 - [本地验证记录](docs/VALIDATION.md)：已执行检查及明确未验证的部分。
+- [Wan 对照检查](docs/WAN_PARITY_AUDIT.md)：部署成本、已补项和剩余多机运行边界。
 
 已选路线：复用 H3EROS 的 Diffusers 权重转换思路；条件编码也由自己部署，不调用公共 Space。首版关闭额外 Turbo LoRA、AoTI、量化和提示词自动改写，以完成准确、可复现的端到端验证为先。
 

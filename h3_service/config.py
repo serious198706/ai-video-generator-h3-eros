@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @dataclass(frozen=True)
 class Settings:
-    region: str = field(default_factory=lambda: os.getenv('AWS_REGION', 'us-east-1'))
+    region: str = field(default_factory=lambda: os.getenv('AWS_REGION') or os.getenv('AWS_DEFAULT_REGION') or 'us-east-1')
     bucket: str = field(default_factory=lambda: os.getenv('H3_S3_BUCKET', ''))
     prefix: str = field(default_factory=lambda: os.getenv('H3_S3_PREFIX', 'video/h3/'))
     public_base: str = field(default_factory=lambda: os.getenv('H3_PUBLIC_BASE_URL', ''))
@@ -30,6 +30,9 @@ class Settings:
     min_free_gib: float = field(default_factory=lambda: float(os.getenv('H3_MIN_FREE_GIB', '88')))
     resident_min_ram_gib: float = field(default_factory=lambda: float(os.getenv('H3_RESIDENT_MIN_RAM_GIB', '160')))
     model_lifetime: str = field(default_factory=lambda: os.getenv('H3_MODEL_LIFETIME', 'resident'))
+    verify_mode: str = field(default_factory=lambda: os.getenv('H3_VERIFY_MODE', 'cached'))
+    transformer_cache: Path = field(default_factory=lambda: Path(os.getenv('H3_TRANSFORMER_CACHE', str(ROOT / 'models/converted'))))
+    converted_cache: bool = field(default_factory=lambda: os.getenv('H3_CONVERTED_CACHE', '1') == '1')
 
     def validate_cloud(self):
         if self.model_lifetime not in {'resident', 'cold'}:

@@ -32,7 +32,7 @@ class ResidentTests(unittest.TestCase):
                 patch('torch.cuda.mem_get_info', return_value=(94 * 1024**3, 95 * 1024**3)), \
                 patch('torch.cuda.synchronize'), patch('torch.cuda.empty_cache'), \
                 patch('h3_service.infer.phase.execute', return_value={'load_s': 0}) as execute:
-            models = ResidentModels(Settings(), lambda message: None)
+            models = ResidentModels(Settings(converted_cache=False), lambda message: None)
             for _ in range(2):
                 for mode in ('condition', 'generate'):
                     result = models.run(mode, {'directory': temp})

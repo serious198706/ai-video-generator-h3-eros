@@ -43,7 +43,7 @@ def fingerprint(request, seed):
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def verify(settings, progress=None, cancelled=None):
+def verify(settings, progress=None, cancelled=None, cache_path=None):
     emit = progress or (lambda message: None)
     stamp = json.loads((settings.model_dir / 'h3-manifest.json').read_text())
     if stamp.get('revision') != BASE_REVISION:
@@ -58,6 +58,20 @@ def verify(settings, progress=None, cancelled=None):
         if not path.resolve().is_relative_to(root):
             raise ValueError('invalid base manifest path')
         checks.append((path, expected, relative))
+    def identity(path, expected):
+        stat = path.stat()
+        return [str(path.resolve()), expected, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+    identities = [identity(p, expected) for p, expected, _ in checks]
+    for component in COMPONENTS:
+        if not (settings.model_dir / component).is_dir():
+            raise ValueError(f'missing component: {component}')
+    if cache_path is not None and cache_path.exists():
+        try:
+            if json.loads(cache_path.read_text()) == identities:
+                emit('Weight hashes: verified local files unchanged; reusing verification cache')
+                return
+        except (ValueError, OSError):
+            pass
     total = sum(path.stat().st_size for path, _, _ in checks)
     completed = 0
     emit(f'Weight hashes: {len(checks)} files, {total / 1024**3:.2f} GiB to read')
@@ -66,10 +80,20 @@ def verify(settings, progress=None, cancelled=None):
             rate = read / max(elapsed, 0.001) / 1024**2
             emit(f'Hash {index}/{len(checks)} {label}: {read / 1024**3:.2f}/{size / 1024**3:.2f} GiB; '
                  f'total {(completed + read) / 1024**3:.2f}/{total / 1024**3:.2f} GiB; {rate:.1f} MiB/s')
+        before = identity(path, expected)
         if sha256(path, progress=on_bytes, cancelled=cancelled) != expected:
             raise ValueError(f'weight hash mismatch: {label}')
+        if identity(path, expected) != before:
+            raise ValueError('weight file changed during verification')
         completed += path.stat().st_size
     emit('All weight hashes verified')
-    for component in COMPONENTS:
-        if not (settings.model_dir / component).is_dir():
-            raise ValueError(f'missing component: {component}')
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        import tempfile, os
+        fd, name = tempfile.mkstemp(dir=cache_path.parent, prefix='.verified-')
+        try:
+            with os.fdopen(fd, 'w') as output:
+                json.dump(identities, output)
+            os.replace(name, cache_path)
+        finally:
+            Path(name).unlink(missing_ok=True)

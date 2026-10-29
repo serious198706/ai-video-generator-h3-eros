@@ -38,15 +38,17 @@ class ResidentModels:
         import torch
         from h3_service.infer.blocks import load_pipeline
         from h3_service.infer.eros import apply_eros
+        from h3_service.infer.converted_cache import load_generator
         self.settings, self.emit = settings, emit
         self.pipes = {}
         # Initial budget is deliberately conservative and configurable; no silent cold fallback.
         self.check_memory(settings.resident_min_ram_gib)
         for mode, conditioner in [('condition', True), ('generate', False)]:
             emit(f'loading resident {mode} into CPU memory')
-            pipe = load_pipeline(settings.model_dir, conditioner=conditioner, progress=emit)
-            if not conditioner:
-                self.conversion = apply_eros(pipe.transformer, settings.eros_file, progress=emit)
+            if conditioner:
+                pipe = load_pipeline(settings.model_dir, conditioner=True, progress=emit)
+            else:
+                pipe, self.conversion = load_generator(settings, emit, load_pipeline, apply_eros)
                 pipe.transformer.set_attention_backend(settings.attention)
             self.pipes[mode] = pipe
             self.check_memory(16)
@@ -176,6 +178,9 @@ class ResidentEngine(Engine):
                        'H3_ATTENTION': self.settings.attention,
                        'H3_MIN_FREE_GIB': str(self.settings.min_free_gib),
                        'H3_RESIDENT_MIN_RAM_GIB': str(self.settings.resident_min_ram_gib)}
+        environment.update(H3_TRANSFORMER_CACHE=str(self.settings.transformer_cache.resolve()),
+                           H3_CONVERTED_CACHE='1' if self.settings.converted_cache else '0',
+                           H3_VERIFY_MODE=self.settings.verify_mode)
         try:
             self.process = subprocess.Popen([sys.executable, '-u', '-m', 'h3_service.infer.resident', self.ipc.name],
                 cwd=str(Path(__file__).resolve().parents[2]), env=environment,
