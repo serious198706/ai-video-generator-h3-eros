@@ -13,6 +13,7 @@ from h3_service.media.cloud import now
 from h3_service.media.images import prepare
 from h3_service.media.webhook import notify
 from h3_service.net.http import download, resolve
+from h3_service.aws_diagnostics import details
 
 LOG = logging.getLogger(__name__)
 TERMINAL = {'succeeded', 'failed'}
@@ -58,7 +59,7 @@ class Worker:
                         if not self.stop.is_set():
                             self.handle(message)
                 except Exception as exc:
-                    LOG.error('task/queue failure type=%s; message retained', type(exc).__name__)
+                    LOG.error('task/queue failure details=%s; message retained', json.dumps(details(exc)))
                     if not getattr(self.engine, 'healthy', True):
                         self.error = 'resident_engine_unavailable'
                         self.stop.set()
@@ -68,7 +69,7 @@ class Worker:
                     self.stop.set()
         except Exception as exc:
             self.error = type(exc).__name__
-            LOG.error('worker initialization failed type=%s', self.error)
+            LOG.error('worker initialization failed details=%s', json.dumps(details(exc)))
         finally:
             self.ready = False
             close = getattr(self.engine, 'close', None)

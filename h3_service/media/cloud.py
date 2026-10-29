@@ -4,6 +4,7 @@ from urllib.parse import quote
 import boto3
 from botocore.config import Config
 from h3_service.contracts.models import task_id
+from h3_service.aws_diagnostics import resource_call
 
 
 def now():
@@ -35,7 +36,7 @@ class Store:
 
     def read(self, ident):
         try:
-            response = self.s3.get_object(Bucket=self.settings.bucket, Key=self.key(ident))
+            response = resource_call(self.s3, 'get_object', Bucket=self.settings.bucket, Key=self.key(ident))
         except self.s3.exceptions.NoSuchKey:
             return None
         with response['Body'] as stream:
@@ -46,7 +47,7 @@ class Store:
 
     def write(self, state):
         state['updated_at'] = now()
-        self.s3.put_object(Bucket=self.settings.bucket, Key=self.key(state['task_id']),
+        resource_call(self.s3, 'put_object', Bucket=self.settings.bucket, Key=self.key(state['task_id']),
                            Body=json.dumps(state, ensure_ascii=False, allow_nan=False).encode(),
                            ContentType='application/json', CacheControl='no-store')
 
@@ -62,7 +63,7 @@ class Store:
     def recover(self, ident, fingerprint):
         # GET has a typed NoSuchKey error, unlike HEAD's generic 404.
         try:
-            response = self.s3.get_object(Bucket=self.settings.bucket, Key=self.key(ident, True), Range='bytes=0-0')
+            response = resource_call(self.s3, 'get_object', Bucket=self.settings.bucket, Key=self.key(ident, True), Range='bytes=0-0')
         except self.s3.exceptions.NoSuchKey:
             return None
         response['Body'].close()

@@ -55,4 +55,6 @@ server 默认使用 ResidentEngine，新增本地测试验证连续两单只加�
 
 本轮完整回归 69 项通过，无跳过；compileall、git diff --check 通过。
 
+AccessDenied 可观测性修复：顶层记录 AWS operation/code/http_status/request_id 及 S3 bucket/key，排除异常原始消息和请求体；新增无模型、无队列消息副作用的只读诊断入口。实际远端拒绝操作尚待诊断输出确认，不把可能的 ListBucket/前缀权限问题写成已确认根因。
+
 benchmark 提供 `--resident --runs 2` 与 server 相同生命周期的验收入口。现有阶段冷加载路径仍可显式使用。GPU 实际显存回落、CPU RSS 稳定性和连续两单成片需在 Vast 主机验证。
