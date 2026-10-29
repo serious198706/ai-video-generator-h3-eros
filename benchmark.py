@@ -27,37 +27,86 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--audio', action='store_true')
     args = parser.parse_args()
-    request = GenerateRequest(image=str(args.image), prompt=args.prompt_file.read_text(), duration=args.duration,
-                              resolution=args.resolution, steps=args.steps, seed=args.seed, audio=args.audio)
-    args.output.mkdir(parents=True, exist_ok=False, mode=0o700)
-    output = args.output.resolve()
-    settings = Settings()
-    engine = Engine(settings)
-    cancelled = threading.Event()
+    total_started = time.monotonic()
+
+    def log(message, *, error=False):
+        elapsed = time.monotonic() - total_started
+        print(f'[{elapsed:8.1f}s] {message}', file=sys.stderr if error else sys.stdout, flush=True)
+
+    image = args.image.expanduser().resolve()
+    last_image = args.last_image.expanduser().resolve() if args.last_image else None
+    prompt_file = args.prompt_file.expanduser().resolve()
+    output = args.output.expanduser().resolve()
     report = {'model': MODEL_ID, 'base_revision': BASE_REVISION, 'diffusers_revision': DIFFUSERS_REVISION,
-              'python': platform.python_version(), 'image_sha256': sha256(args.image),
-              'prompt_sha256': sha256(args.prompt_file), 'status': 'running'}
+              'python': platform.python_version(), 'status': 'running'}
     try:
+        log('H3 benchmark starting')
+        log(f'Model: {MODEL_ID}')
+        log(f'Input image: {image}')
+        log(f'Last image: {last_image or "(none)"}')
+        log(f'Prompt file: {prompt_file}')
+        log(f'Output directory: {output}')
+        log(f'Request: resolution={args.resolution}, duration={args.duration}s, steps={args.steps}, '
+            f'seed={args.seed}, audio={args.audio}')
+        request = GenerateRequest(image=str(image), prompt=prompt_file.read_text(), duration=args.duration,
+                                  resolution=args.resolution, steps=args.steps, seed=args.seed, audio=args.audio)
+        output.mkdir(parents=True, exist_ok=False, mode=0o700)
+        settings = Settings()
+        engine = Engine(settings)
+        cancelled = threading.Event()
+        report.update(image_sha256=sha256(image), prompt_sha256=sha256(prompt_file))
+
+        log('Preflight started: runtime/dependency checks, weight hashes, conditioner and generator GPU load probes')
         started = time.monotonic()
         engine.preflight(cancelled)
         report['preflight_s'] = time.monotonic() - started
-        first, last, width, height = prepare(args.image, args.last_image, request.resolution, output)
+        log(f'Preflight passed in {report["preflight_s"]:.1f}s')
+
+        log('Preparing input image(s)')
+        first, last, width, height = prepare(image, last_image, request.resolution, output)
         job = {'prompt': request.prompt, 'first': str(first), 'last': str(last) if last else None,
                'width': width, 'height': height, 'num_frames': frame_count(request.duration),
                'steps': request.steps, 'seed': request.seed, 'audio': request.audio}
-        report['resolved'] = {k: v for k, v in job.items() if k not in ('prompt', 'first', 'last')}
-        _, metrics = engine.generate(job, output, cancelled, lambda stage: print(stage, flush=True))
+        report['resolved'] = {k: v for k, v in job.items() if k not in {'prompt', 'first', 'last'}}
+        log(f'Resolved: canvas={width}x{height}, frames={job["num_frames"]}, fps=24, '
+            f'actual_duration={job["num_frames"] / 24:.3f}s')
+
+        stage_name = None
+        stage_started = None
+
+        def on_stage(stage):
+            nonlocal stage_name, stage_started
+            now = time.monotonic()
+            if stage_name is not None:
+                log(f'Stage finished: {stage_name} ({now - stage_started:.1f}s)')
+            stage_name, stage_started = stage, now
+            log(f'Stage started: {stage} (includes cold model loading)')
+
+        video_path, metrics = engine.generate(job, output, cancelled, on_stage)
+        if stage_name is not None:
+            log(f'Stage finished: {stage_name} ({time.monotonic() - stage_started:.1f}s)')
+        for phase, timing in metrics.get('timing', {}).items():
+            log(f'{phase} timing: load={timing.get("load_s", 0):.1f}s, '
+                f'compute_export={timing.get("compute_export_s", 0):.1f}s, '
+                f'wall={timing.get("wall_s", 0):.1f}s, '
+                f'peak_allocated={timing.get("peak_allocated_gib", 0):.2f} GiB, '
+                f'peak_reserved={timing.get("peak_reserved_gib", 0):.2f} GiB')
         report.update(status='succeeded', **metrics)
+        log(f'Generation succeeded: {video_path} ({video_path.stat().st_size / 1024**2:.1f} MiB)')
         return 0
     except Exception as exc:
         report.update(status='failed', error=type(exc).__name__)
-        print(f'Benchmark failed: {type(exc).__name__}', file=sys.stderr)
+        log(f'Benchmark failed: {type(exc).__name__}; partial artifacts retained in {output}', error=True)
         return 1
     finally:
+        report['total_s'] = time.monotonic() - total_started
         # The temporary prompt and embedding files are not part of the benchmark artifact.
         for name in ('job.json', 'conditioning.safetensors'):
             (output / name).unlink(missing_ok=True)
-        (output / 'report.json').write_text(json.dumps(report, indent=2))
+        report_path = output / 'report.json'
+        report_path.write_text(json.dumps(report, indent=2))
+        log(f'Report written: {report_path}')
+        log(f'Benchmark finished: status={report["status"]}, total={report["total_s"]:.1f}s')
 
 
 if __name__ == '__main__':
