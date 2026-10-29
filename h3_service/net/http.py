@@ -1,4 +1,4 @@
-"""HTTPS with validated, pinned DNS addresses. No ambient proxy or redirects for POST."""
+"""Wan-compatible image transport; separate pinned HTTPS transport for callbacks."""
 import ipaddress
 import socket
 import time
@@ -27,9 +27,9 @@ def resolve(url, hosts=(), *, webhook=False):
         raise UrlError('HTTPS URL without credentials or fragment required')
     if port != 443:
         raise UrlError('only HTTPS port 443 is allowed')
-    allowed = [h.strip().lower() for h in hosts if h.strip()]
-    host = host.lower()
-    if allowed and not any(host == h or (h.startswith('.') and host.endswith(h) and host != h[1:]) for h in allowed):
+    allowed = [h.strip().lower().rstrip('.') for h in hosts if h.strip()]
+    host = host.lower().rstrip('.')
+    if allowed and not any(host == h or (h.startswith('.') and (host.endswith(h) or host == h[1:])) for h in allowed):
         raise UrlError('host is not allowed')
     try:
         addresses = sorted({item[4][0] for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
@@ -68,29 +68,42 @@ def request(url, *, hosts=(), webhook=False, method='GET', body=None, headers=No
 
 
 def download(url, destination: Path, hosts=()):
+    """Use Wan's requests Session/hostname transport for image downloads."""
+    import os
+    import requests
+    timeout = float(os.getenv('H3_DOWNLOAD_TIMEOUT', os.getenv('WAN22_DOWNLOAD_TIMEOUT', '30')))
     deadline = time.monotonic() + 90
-    for _ in range(4):
-        pool, response = request(url, hosts=hosts)
-        try:
-            if response.status in (301, 302, 303, 307, 308):
-                location = response.headers.get('Location')
-                if not location:
-                    raise UrlError('redirect without location')
-                url = urljoin(url, location)
-                continue
-            if response.status != 200:
-                raise UrlError('image download rejected', http_status=response.status)
-            if int(response.headers.get('Content-Length', '0')) > MAX_IMAGE_BYTES:
-                raise UrlError('image too large')
-            size = 0
-            with destination.open('wb') as output:
-                for chunk in response.stream(65536):
-                    size += len(chunk)
-                    if size > MAX_IMAGE_BYTES or time.monotonic() > deadline:
-                        raise UrlError('image limit exceeded')
-                    output.write(chunk)
-            return
-        finally:
-            response.close()
-            pool.close()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with requests.Session() as session:
+        for _ in range(6):  # Wan permits up to five redirects.
+            resolve(url, hosts)  # Validate each redirect before connecting.
+            if time.monotonic() > deadline:
+                raise UrlError('image download timeout')
+            try:
+                with session.get(url, stream=True, timeout=timeout, allow_redirects=False,
+                                 headers={'User-Agent': 'wan22-server/1'}) as response:
+                    if response.is_redirect:
+                        location = response.headers.get('Location')
+                        if not location:
+                            raise UrlError('redirect without location')
+                        url = urljoin(url, location)
+                        continue
+                    if response.status_code != 200:
+                        raise UrlError('image download rejected', http_status=response.status_code)
+                    if int(response.headers.get('Content-Length', '0')) > MAX_IMAGE_BYTES:
+                        raise UrlError('image too large')
+                    size = 0
+                    with destination.open('wb') as output:
+                        for chunk in response.iter_content(chunk_size=65536):
+                            if not chunk:
+                                continue
+                            size += len(chunk)
+                            if size > MAX_IMAGE_BYTES or time.monotonic() > deadline:
+                                raise UrlError('image limit exceeded')
+                            output.write(chunk)
+                    if not size:
+                        raise UrlError('image is empty')
+                    return
+            except requests.RequestException as exc:
+                raise UrlError('image download transport failed') from exc
     raise UrlError('too many redirects')

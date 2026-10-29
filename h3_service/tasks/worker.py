@@ -27,6 +27,14 @@ def input_failure(exc):
     from h3_service.net.http import UrlError
     if isinstance(exc, UrlError):
         result.update(reason=exc.code, http_status=exc.http_status)
+    causes = []
+    cause = exc.__cause__ or exc.__context__
+    for _ in range(4):
+        if cause is None:
+            break
+        causes.append(type(cause).__name__)
+        cause = cause.__cause__ or cause.__context__
+    result['cause_types'] = causes
     return json.dumps(result)
 
 
