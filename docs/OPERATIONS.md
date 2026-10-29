@@ -108,9 +108,11 @@ S3 使用 KMS 时另需相应密钥权限。视频前缀可经 CDN 服务，状�
 
 ## 恢复与排错
 
-AWS AccessDenied 排查先运行 `./check-aws.sh`，无需重启 GPU 服务或加载模型；可加 `--task-id` 指定已知任务。脚本仅读取队列属性和两个 S3 对象，不领取/删除消息、不写对象。输出实际 bucket/prefix、操作名、HTTP 错误码和 request ID；使用当前 shell/.env 的凭证，若它与运行中 server 的环境已不同，结果不能代表旧进程。
+AWS AccessDenied 排查运行 `./check-aws.sh --task-id REAL_TASK_ID`，必须提供现有 Lambda 返回的真实任务 ID；默认仅读取该状态对象，已完成任务才可加 `--video` 测试视频。无需重启 GPU 服务或加载模型，不领取/删除消息、不写对象。输出实际 bucket/prefix、操作名、HTTP 错误码和 request ID；使用当前 shell/.env 的凭证，若它与运行中 server 的环境已不同，结果不能代表旧进程。旧脚本默认生成随机 ID，其 403 不能证明真实已存在对象也不可读。
 
 S3 的 GetObject 请求在目标不存在且身份缺少 s3:ListBucket 时可能返回 403，而不是 404。H3 的终态/上传恢复检查不能把所有 403 当作不存在，否则真实权限故障会被掩盖。运行身份需要 S3 对象 GetObject/PutObject，以及使缺失对象可正确判定的桶 ListBucket 权限；若视频 prefix 改成 video/h3/，IAM/桶策略也需覆盖该前缀。STS/队列属性通过不代表这些 S3 权限已通过。参考 [S3 GetObject 权限与缺失对象响应](https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html)。
+
+新任务现在只读取 Lambda 已写入的状态，不 GET 尚未生成的视频。进入 upload 阶段前持久化 upload_started；只有存在这个标记（或旧版本 stage=upload）的重投任务才读取视频恢复结果，避免为普通新任务增加缺失对象读取要求。真实状态读取 AccessDenied 仍明确报错，不静默绕过幂等检查。Wan 的旧实现对状态读取异常只记日志并继续，因此“Wan 能生成”不等同于它的状态读取未出过错。
 
 - 视频上传与其 metadata 一起提交，metadata 包含 task_id、模型/请求指纹和结果参数。终态写失败时不删消息，重投校验该 metadata 后补终态。
 - 已有终态的重复投递不会重新生成；即使 receive_count 已超上限，也先保护已有终态。

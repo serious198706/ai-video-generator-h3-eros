@@ -33,6 +33,8 @@ class ExecutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             settings = Settings(work_dir=Path(temp), heartbeat=0.01)
             worker = Worker(settings, store, queue, FakeEngine())
+            store.states[ident] = {'task_id': ident, 'request': request.model_dump(),
+                                   'status': 'generating', 'upload_started': True}
 
             def wait_for_failure(*args):
                 self.assertTrue(worker.cancelled.wait(2))

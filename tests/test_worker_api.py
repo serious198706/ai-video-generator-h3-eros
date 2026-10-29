@@ -40,6 +40,11 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(self.engine.calls, 1)
         self.assertEqual(self.store.states[IDENT]['status'], 'succeeded')
 
+    def test_fresh_queued_job_does_not_get_missing_video(self):
+        with patch.object(self.store, 'recover', side_effect=AssertionError('fresh task must not GET a video')):
+            self.run_job()
+        self.assertEqual(self.store.states[IDENT]['status'], 'succeeded')
+
     def test_upload_recovery_after_terminal_write_failure(self):
         self.store.fail_terminal = True
         with self.assertRaises(OSError):

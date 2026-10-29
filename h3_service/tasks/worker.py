@@ -135,9 +135,12 @@ class Worker:
         heartbeat_thread.start()
         try:
             if state['status'] not in TERMINAL:
-                persist(status='pending', stage='recovery')  # seed durable before any generation
+                # A newly queued task has no video yet. Only inspect video metadata after a
+                # persisted upload attempt, avoiding a guaranteed missing-object GET per task.
+                recover_upload = bool(state.get('upload_started')) or state.get('stage') == 'upload'
+                persist(status='pending', stage='recovery', upload_started=recover_upload)
                 stamp = fingerprint(requested, state['seed'])
-                result = self.store.recover(ident, stamp)
+                result = self.store.recover(ident, stamp) if recover_upload else None
                 if result is not None:
                     persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
                 elif int(message.get('Attributes', {}).get('ApproximateReceiveCount', '1')) >= self.settings.max_receive:
@@ -196,7 +199,7 @@ class Worker:
             self.check()
             result = {'seed': state['seed'], 'width': width, 'height': height, 'num_frames': frames, 'fps': 24,
                       'actual_duration': frames / 24, 'audio_present': request.audio, 'model': metrics['model']}
-            persist(stage='upload', timing=metrics['timing'])
+            persist(stage='upload', timing=metrics['timing'], upload_started=True)
             # Transport exceptions propagate: leave message unacked for recovery/retry.
             self.store.upload(ident, output, result, stamp)
             persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
