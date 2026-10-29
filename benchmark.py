@@ -20,7 +20,8 @@ def main():
     parser.add_argument('--image', type=Path, required=True)
     parser.add_argument('--last-image', type=Path)
     parser.add_argument('--prompt-file', type=Path, required=True)
-    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--output', type=Path, required=True, help='new output directory, not an MP4 filename')
+    parser.add_argument('--load-probes', action='store_true', help='also load both models as separate preflight probes (loads twice)')
     parser.add_argument('--duration', type=float, default=5)
     parser.add_argument('--resolution', default='540p')
     parser.add_argument('--steps', type=int, default=6)
@@ -39,6 +40,7 @@ def main():
     output = args.output.expanduser().resolve()
     report = {'model': MODEL_ID, 'base_revision': BASE_REVISION, 'diffusers_revision': DIFFUSERS_REVISION,
               'python': platform.python_version(), 'status': 'running'}
+    output_created = False
     try:
         log('H3 benchmark starting')
         log(f'Model: {MODEL_ID}')
@@ -51,14 +53,18 @@ def main():
         request = GenerateRequest(image=str(image), prompt=prompt_file.read_text(), duration=args.duration,
                                   resolution=args.resolution, steps=args.steps, seed=args.seed, audio=args.audio)
         output.mkdir(parents=True, exist_ok=False, mode=0o700)
+        output_created = True
+        if output.suffix.lower() == '.mp4':
+            log('Note: --output is a directory; the video will be written to ' + str(output / 'output.mp4'))
         settings = Settings()
-        engine = Engine(settings)
+        engine = Engine(settings, progress=log)
         cancelled = threading.Event()
         report.update(image_sha256=sha256(image), prompt_sha256=sha256(prompt_file))
 
-        log('Preflight started: runtime/dependency checks, weight hashes, conditioner and generator GPU load probes')
+        log('Preflight started: runtime/dependency checks, full weight hashes; '
+            f'separate model-load probes={args.load_probes}')
         started = time.monotonic()
-        engine.preflight(cancelled)
+        engine.preflight(cancelled, probe_models=args.load_probes, diagnostic_dir=output / 'preflight')
         report['preflight_s'] = time.monotonic() - started
         log(f'Preflight passed in {report["preflight_s"]:.1f}s')
 
@@ -101,11 +107,12 @@ def main():
     finally:
         report['total_s'] = time.monotonic() - total_started
         # The temporary prompt and embedding files are not part of the benchmark artifact.
-        for name in ('job.json', 'conditioning.safetensors'):
-            (output / name).unlink(missing_ok=True)
-        report_path = output / 'report.json'
-        report_path.write_text(json.dumps(report, indent=2))
-        log(f'Report written: {report_path}')
+        if output_created:
+            for name in ('job.json', 'conditioning.safetensors'):
+                (output / name).unlink(missing_ok=True)
+            report_path = output / 'report.json'
+            report_path.write_text(json.dumps(report, indent=2))
+            log(f'Report written: {report_path}')
         log(f'Benchmark finished: status={report["status"]}, total={report["total_s"]:.1f}s')
 
 

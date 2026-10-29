@@ -40,13 +40,18 @@ class GeneratorBlocks(SequentialPipelineBlocks):
         return _generation_outputs()
 
 
-def load_pipeline(model_dir, *, conditioner):
+def load_pipeline(model_dir, *, conditioner, progress=None):
     import torch
+    emit = progress or (lambda message: None)
     # Same explicit extension as upstream Space; short clips remain GPU-unvalidated.
     MiniMaxH3ModularPipeline.min_duration = property(lambda self: 2.0)
     blocks = ConditionerBlocks() if conditioner else GeneratorBlocks()
+    emit('initializing local pipeline configuration')
     pipe = blocks.init_pipeline(str(model_dir))
-    pipe.load_components(dtype=torch.bfloat16, local_files_only=True)
+    for component in blocks.expected_components:
+        if component.default_creation_method == 'from_pretrained':
+            emit(f'loading component from disk: {component.name}')
+            pipe.load_components(names=[component.name], dtype=torch.bfloat16, local_files_only=True)
     # Upstream load_components logs and continues on individual load errors.
     missing = [c.name for c in blocks.expected_components if getattr(pipe, c.name, None) is None]
     if missing:

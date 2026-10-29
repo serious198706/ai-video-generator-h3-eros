@@ -32,6 +32,14 @@ worker 父进程不导入 torch。启动时核对固定依赖和文件哈希，�
 
 输出包含 `output.mp4`、转换覆盖报告、各阶段报告、音频指标及总报告。临时提示词 job 和 embeddings 完成后删除。所有生成都含冷加载，不能把报告称为常驻模型吞吐测试。失败退出非零，不生成伪成功结果。
 
+benchmark 默认 preflight 只运行依赖/CUDA kernel 检查和全量权重哈希校验；不额外加载两套模型作空探测，避免正式生成前重复读取、转换和 GPU 放置。`--load-probes` 可恢复额外探测；worker 启动仍保留完整探测。
+
+哈希阶段每 5 秒报告当前文件、读取 GiB 和速率；模型阶段报告当前组件、Eros 转换进度及 GPU 放置，并至少每 10 秒报告子进程 PID/存活等待时间。子进程第三方 stdout/stderr 仍不直接透传，防止提示词出现在日志；受控阶段状态通过独立 JSON 文件传回。benchmark 的 preflight 报告保留在输出目录的 `preflight/`。
+
+`--output` 必须是新目录，不是 MP4 文件名。例如传入 `/workspace/test.mp4`，实际视频路径会是 `/workspace/test.mp4/output.mp4`。已有目录会拒绝使用，且不修改其报告或删除其临时文件。
+
+Vast 的系统 `nvcc=13.2` 与旧 venv 的 `torch.version.cuda=12.8` 可以并存。H3 固定安装 `torch==2.11.0+cu130` / `torchvision==0.26.0+cu130`，不复用 cu128 环境；当前没有编译 Sage/FlashAttention 扩展，不要求把系统 Toolkit 改为 13.0。部署先检查驱动 R580+，安装后实际运行 BF16/cuDNN kernel，再下载模型。驱动下限仅为初步条件，不代替实际运算检查。参考 [PyTorch wheel 安装组合](https://pytorch.org/get-started/previous-versions/) 和 [NVIDIA CUDA 兼容性](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)。
+
 ## Lambda 接入
 
 打包入口 `./lambda_api/package.sh`，产物 `dist/h3-lambda.zip`，Python 3.12 / x86_64，handler 为 `lambda_api.handler.handler`。包只包含服务依赖和轻量模块，不包含 torch、模型或 worker 推理代码。

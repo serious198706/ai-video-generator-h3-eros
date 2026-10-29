@@ -48,7 +48,7 @@ def map_tensor(name, tensor, inner_dim):
 
 
 @torch.no_grad()
-def apply_eros(transformer, path):
+def apply_eros(transformer, path, progress=None):
     params = dict(transformer.named_parameters())
     written, skipped = set(), set()
     inner = transformer.config.num_attention_heads * transformer.config.attention_head_dim
@@ -70,7 +70,9 @@ def apply_eros(transformer, path):
         if not SKIP <= keys:
             raise ValueError('missing reference auxiliaries')
         basis, mean = source.get_tensor('adaln_basis'), source.get_tensor('adaln_mean')
-        for name in sorted(keys):
+        for index, name in enumerate(sorted(keys), 1):
+            if progress and (index == 1 or index % 16 == 0):
+                progress(f'Eros conversion: source tensor {index}/{len(keys)}, {len(written)} target parameters copied')
             if name in SKIP:
                 skipped.add(name)
                 continue
@@ -91,4 +93,6 @@ def apply_eros(transformer, path):
     remaining = set(params) - written
     if remaining != KEEP:
         raise ValueError(f'unexpected untouched parameters: {sorted(remaining ^ KEEP)}')
+    if progress:
+        progress(f'Eros conversion complete: {len(written)} replaced, {len(remaining)} retained')
     return {'replaced': len(written), 'written': sorted(written), 'retained': sorted(remaining), 'skipped': sorted(skipped)}

@@ -9,6 +9,7 @@ import time
 import importlib.metadata
 import logging
 from pathlib import Path
+from contextlib import nullcontext
 from h3_service.infer.manifest import verify, MODEL_ID
 
 
@@ -23,12 +24,17 @@ class GenerationError(RuntimeError):
 
 
 class Engine:
-    def __init__(self, settings):
+    def __init__(self, settings, progress=None):
         self.settings = settings
+        self.progress = progress or (lambda message: logging.getLogger(__name__).info('%s', message))
 
     def phase(self, mode, directory, cancelled, job=None):
         report = directory / f'{mode}-report.json'
-        command = [sys.executable, '-m', 'h3_service.infer.phase', mode, '--report', str(report)]
+        progress_file = directory / f'{mode}-progress.json'
+        progress_file.unlink(missing_ok=True)
+        report.unlink(missing_ok=True)
+        command = [sys.executable, '-u', '-m', 'h3_service.infer.phase', mode, '--report', str(report),
+                   '--progress-file', str(progress_file)]
         if job:
             command += ['--job', str(job)]
         environment = {**os.environ, 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
@@ -39,12 +45,26 @@ class Engine:
         proc = subprocess.Popen(command, env=environment, cwd=str(Path(__file__).resolve().parents[2]),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         deadline = time.monotonic() + self.settings.phase_timeout
+        started = last_notice = time.monotonic()
+        last_stage = None
+        self.progress(f'{mode}: subprocess started, pid={proc.pid}; waiting for Python imports')
         try:
             while proc.poll() is None:
                 if cancelled.is_set():
                     raise LeaseLost('execution ownership lost')
                 if time.monotonic() > deadline:
                     raise GenerationError('phase_timeout')
+                stage = None
+                if progress_file.exists():
+                    try:
+                        stage = json.loads(progress_file.read_text()).get('stage')
+                    except (OSError, ValueError):
+                        pass  # Atomic replace normally prevents this; tolerate transient filesystem reads.
+                current = time.monotonic()
+                if (stage and stage != last_stage) or current - last_notice >= 10:
+                    self.progress(f'{mode}: {stage or last_stage or "Python imports/startup"}; '
+                                  f'elapsed={current - started:.1f}s, pid={proc.pid}')
+                    last_stage, last_notice = stage or last_stage, current
                 cancelled.wait(0.25)
             if cancelled.is_set():
                 raise LeaseLost('execution ownership lost')
@@ -53,7 +73,9 @@ class Engine:
                     diagnostic = json.loads(report.read_text())
                     logging.getLogger(__name__).error('phase=%s failure=%s', mode, diagnostic)
                 raise GenerationError('conditioning_failed' if 'condition' in mode else 'generate_failed')
-            return json.loads(report.read_text())
+            result = json.loads(report.read_text())
+            self.progress(f'{mode}: completed in {time.monotonic() - started:.1f}s')
+            return result
         finally:
             if proc.poll() is None:
                 os.killpg(proc.pid, signal.SIGTERM)
@@ -63,7 +85,8 @@ class Engine:
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
 
-    def preflight(self, cancelled):
+    def preflight(self, cancelled, *, probe_models=True, diagnostic_dir=None):
+        self.progress('Preflight: checking dependencies and ffprobe')
         if not shutil.which('ffprobe'):
             raise RuntimeError('ffprobe is required')
         from h3_service.infer.manifest import DIFFUSERS_REVISION
@@ -76,11 +99,18 @@ class Engine:
             if importlib.metadata.version(name) != version:
                 raise RuntimeError(f'{name} version mismatch')
         self.settings.work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with tempfile.TemporaryDirectory(dir=self.settings.work_dir) as temp:
+        if diagnostic_dir is not None:
+            diagnostic_dir = Path(diagnostic_dir)
+            diagnostic_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        context = nullcontext(diagnostic_dir) if diagnostic_dir is not None else tempfile.TemporaryDirectory(dir=self.settings.work_dir)
+        with context as temp:
             self.phase('probe-runtime', Path(temp), cancelled)
-            verify(self.settings)
-            for mode in ('probe-condition', 'probe-generate'):
-                self.phase(mode, Path(temp), cancelled)
+            verify(self.settings, progress=self.progress, cancelled=cancelled)
+            if probe_models:
+                for mode in ('probe-condition', 'probe-generate'):
+                    self.phase(mode, Path(temp), cancelled)
+            else:
+                self.progress('Preflight: separate model-load probes omitted; actual generation loads and validates both models')
 
     def generate(self, job, directory, cancelled, stage):
         file = directory / 'job.json'
