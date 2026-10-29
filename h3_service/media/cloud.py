@@ -17,7 +17,10 @@ def clients(settings):
     options = {'config': config}
     if settings.endpoint:
         options['endpoint_url'] = settings.endpoint
-    return session.client('s3', **options), session.client('sqs', **options)
+    queue_options = {'config': config}
+    if settings.sqs_endpoint:
+        queue_options['endpoint_url'] = settings.sqs_endpoint
+    return session.client('s3', **options), session.client('sqs', **queue_options)
 
 
 class Store:
@@ -27,7 +30,8 @@ class Store:
     def key(self, ident, video=False):
         task_id(ident)
         tail = f'{ident}.mp4' if video else f'status/{ident}.json'
-        return self.settings.prefix.strip('/') + '/' + tail
+        prefix = self.settings.prefix if video else self.settings.status_prefix
+        return '/'.join(part for part in (prefix.strip('/'), tail) if part)
 
     def read(self, ident):
         try:

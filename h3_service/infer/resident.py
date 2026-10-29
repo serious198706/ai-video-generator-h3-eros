@@ -35,7 +35,10 @@ def available_memory(meminfo=Path('/proc/meminfo'), root=Path('/sys/fs/cgroup'))
 
 class ResidentModels:
     def __init__(self, settings, emit):
+        from h3_service.infer.cpu_budget import configure_environment, configure_torch
+        configure_environment()
         import torch
+        emit(f'CPU intra-op thread budget: {configure_torch()}')
         from h3_service.infer.blocks import load_pipeline
         from h3_service.infer.eros import apply_eros
         from h3_service.infer.converted_cache import load_generator
@@ -187,6 +190,7 @@ class ResidentEngine(Engine):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             self.wait_reply(Path(self.ipc.name) / 'ready.json', cancelled)
             self.healthy = True
+            self.progress(f'Resident models ready on CPU; pid={self.process.pid}; subsequent jobs reuse loaded weights')
         except BaseException:
             self.close()
             raise

@@ -61,11 +61,19 @@ benchmark 默认 preflight 只运行依赖/CUDA kernel 检查和全量权重哈�
 
 Vast 的系统 `nvcc=13.2` 与旧 venv 的 `torch.version.cuda=12.8` 可以并存。H3 固定安装 `torch==2.11.0+cu130` / `torchvision==0.26.0+cu130`，不复用 cu128 环境；当前没有编译 Sage/FlashAttention 扩展，不要求把系统 Toolkit 改为 13.0。部署先检查驱动 R580+，安装后实际运行 BF16/cuDNN kernel，再下载模型。驱动下限仅为初步条件，不代替实际运算检查。参考 [PyTorch wheel 安装组合](https://pytorch.org/get-started/previous-versions/) 和 [NVIDIA CUDA 兼容性](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)。
 
-## Lambda 接入
+## 现有 Wan Lambda 接入（唯一入口）
 
-打包入口 `./lambda_api/package.sh`，产物 `dist/h3-lambda.zip`，Python 3.12 / x86_64，handler 为 `lambda_api.handler.handler`。包只包含服务依赖和轻量模块，不包含 torch、模型或 worker 推理代码。
+继续使用已部署的 Wan API Gateway/Lambda，不部署本目录的 lambda_api；该目录仅保留历史实现，当前不作为上线步骤。H3 是现有接单链路的 GPU 消费端。
 
-API Gateway 将 `/v1/generate` 和 `/v1/tasks/{id}` 代理给 Lambda。身份认证由 API Gateway/IAM 或已有业务网关承担；应用不自行实现用户鉴权。Lambda 配置使用与 worker 一致的 H3 queue/bucket/prefix/public base。
+worker 接受 Wan 平铺 SQS JSON：task_id、image_url、last_image_url、prompt、negative_prompt、duration、resolution、webhook_url、seed、steps、quality、audio。null 的 steps/resolution/duration 按 H3 默认处理。已有嵌套 request 格式保留兼容，但不要求生产者改变格式。
+
+S3 中 request 保留 Wan 原始消息；内部仅将其归一化后比对，阶段/终态写回原始结构。回调保持 Wan 的 id/task_id/status/video_url/error/seed/duration/resolution 字段，以及 X-Wan-Signature 签名头。实际画幅、帧数和音轨信息保留在状态 result 内，不扩展旧回调字段。
+
+配置直接兼容 SQS_QUEUE_URL、WAN22_S3_BUCKET（或 S3_BUCKET）、WAN22_S3_PREFIX、WAN22_STATUS_PREFIX（或 STATUS_PREFIX）、WAN22_S3_PUBLIC_BASE_URL、WAN22_WEBHOOK_SECRET/WEBHOOK_HOSTS/IMAGE_HOSTS；H3_* 显式值可覆盖。视频和状态前缀分开：H3_S3_PREFIX 可以放 video/h3/，状态默认仍为旧 Lambda 的 video/wan22/status/；若现网 Lambda 修改过 STATUS_PREFIX，则在 GPU 机配置同值的 STATUS_PREFIX 或 H3_STATUS_PREFIX。旧 .env 已显式填写的值不会被自动覆盖。
+
+本地已通过原始 server/lambda_api/status.py 的 describe 实现测试，确认其能从同一 key 读取 H3 终态和视频 URL。检查真实任务参数可运行 python -m scripts.check_task MESSAGE_FILE；不涉及 GPU 或队列操作。
+
+同一无路由队列中的消息没有模型选择字段，同时启动 Wan 与 H3 消费者时会由抢到消息的一方生成，不能保证模型选择。当前可以用原接单入口/原队列，仅保持所需模型的 worker 活跃；统一项目与 adapter 路由按用户要求后续重构。
 
 ```json
 {
@@ -87,7 +95,7 @@ API Gateway 将 `/v1/generate` 和 `/v1/tasks/{id}` 代理给 Lambda。身份认
 
 ## AWS 权限及队列
 
-使用独立 H3 Standard queue；设置 DLQ redrive policy，建议 maxReceiveCount=5。完全非法的 envelope 保留给 DLQ，避免未知任务被静默丢弃。Lambda 和 worker 均不能共享 Wan 队列。
+使用现有接单 Standard queue；保留 DLQ redrive policy，建议 maxReceiveCount=5。完全非法的 envelope 保留给 DLQ，避免未知任务被静默丢弃。当前由所需模型的 worker 消费现有队列。
 
 | 角色 | 必需权限 |
 | --- | --- |
@@ -119,6 +127,10 @@ python -m unittest discover -s tests -v
 测试中的 fake engine 只存在于 `tests/`，不会上传或消费真实 AWS 资源。真实媒体封装测试需要 ffprobe；缺少时会明确 skip。完整 GPU 验收必须另跑 benchmark。
 
 ## 重复部署和重启成本
+
+CPU 线程池现在默认 8 线程，并按可见 cgroup `cpu.max` 与进程 affinity 取更小上限；`H3_CPU_THREADS` 可调整。用户提供的配额 1152000/100000 等于 11.52 核，不能按 96 个可见逻辑 CPU 设置 PyTorch/OpenMP/MKL 线程数。该设置在模型子进程导入 torch 前应用，并显式设置 torch intra-op 线程；现有进程需下次重启才生效。
+
+`python -m scripts.transfer_probe` 可在 GPU 空闲时测 256 MiB 预分配缓冲的 pageable/pinned 双向复制（各 3 次取中位数）。无需加载模型或重启 server，但应避免与生成任务同时运行。该工具测复制路径，不包含模型权重分配、磁盘缺页或数百个 tensor 的调度开销，结果不能直接当作完整模型搬运速度。
 
 - `git pull` 不会主动重启运行中的 server；Python 已加载的业务代码需要重启后才更新。不要对 GPU 服务使用 `--reload`。
 - requirements 内容未变化且存在部署标记时，deploy 复用 venv，跳过 pip install；仍执行 pip check。需要修复依赖时 `H3_REINSTALL=1 ./deploy.sh`。

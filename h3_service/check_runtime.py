@@ -36,7 +36,10 @@ def check_host():
 
 def check_runtime(attention='_native_cudnn'):
     report = check_host()
+    from h3_service.infer.cpu_budget import configure_environment, configure_torch
+    configure_environment()
     import torch
+    report['cpu_threads'] = configure_torch()
     import torchvision
     validate_wheel(torch.__version__, torch.version.cuda, torchvision.__version__)
     if not torch.cuda.is_available():

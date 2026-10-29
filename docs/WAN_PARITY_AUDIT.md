@@ -2,6 +2,8 @@
 
 2026-10-29。依据本地 server/deploy.sh、setup-aws.sh、start.sh、SQS runner 和 H3 实现检查。
 
+接入决定更新：继续使用既有 Wan Lambda/队列，不部署新的 H3 Lambda；H3 worker 已对齐平铺 SQS 消息、原样 S3 request、默认状态 key 与回调字段。统一项目和 adapter 重构后续再做。同一队列当前仅保持目标模型的 worker 活跃，避免无路由情况下随机选择模型。
+
 | 检查项 | H3 结果/本次处理 |
 | --- | --- |
 | 部署阶段请求并保存 AWS 凭证 | 已补：隐藏输入、STS 验证后原子写 .env，0600，不打印值，--force 轮换 |

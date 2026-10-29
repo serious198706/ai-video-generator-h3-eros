@@ -1,7 +1,7 @@
 import math
 import re
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def task_id(value: str) -> str:
@@ -61,3 +61,45 @@ class Message(BaseModel):
     @classmethod
     def valid_id(cls, value):
         return task_id(value)
+
+    @model_validator(mode='before')
+    @classmethod
+    def wan_flat_message(cls, value):
+        if not isinstance(value, dict) or 'request' in value:
+            return value
+        fields = dict(value)
+        envelope = {'task_id': fields.pop('task_id', None)}
+        if 'schema_version' in fields:
+            envelope['schema_version'] = fields.pop('schema_version')
+        for old, new in [('image_url', 'image'), ('last_image_url', 'last_image')]:
+            if old in fields:
+                if new in fields and fields[new] != fields[old]:
+                    raise ValueError('conflicting image aliases')
+                fields[new] = fields.pop(old)
+        # Wan serializes optional defaults as null; H3 resolves these explicitly.
+        for name in ('duration', 'resolution', 'steps'):
+            if fields.get(name, 'present') is None:
+                fields.pop(name)
+        envelope['request'] = fields
+        return envelope
+
+
+def normalize_stored_request(value, ident):
+    if not isinstance(value, dict):
+        raise ValueError('stored request must be an object')
+    if 'task_id' in value:
+        message = Message.model_validate(value)
+        if message.task_id != ident:
+            raise ValueError('stored request task identity conflict')
+    else:
+        message = Message.model_validate({'task_id': ident, **value})
+    return message.request.model_dump()
+
+
+def validation_summary(exc):
+    """No input values, user-provided messages/context, prompts or signed URLs."""
+    known = set(GenerateRequest.model_fields) | {'request', 'task_id', 'schema_version',
+        'negativePrompt', 'lastImage', 'webhookUrl', 'image_url', 'last_image_url'}
+    return [{'field': '.'.join(str(part) if part in known or isinstance(part, int) else '<unknown-field>'
+                              for part in error['loc']), 'type': error['type']}
+            for error in exc.errors(include_input=False, include_context=False, include_url=False)]

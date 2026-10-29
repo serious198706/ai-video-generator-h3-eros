@@ -43,4 +43,16 @@ server 默认使用 ResidentEngine，新增本地测试验证连续两单只加�
 
 后续按用户明确授权，setup/deploy 已改为 STS 验证后保存本机 .env（0600）。增加持久化保留业务配置、特殊字符 shell 引用、旧 token 清理、验证失败不覆盖、权重校验缓存失效、转换 checkpoint 复用和损坏重建测试。另增加队列检查失败时模型不加载测试。GPU 上的 checkpoint 保存/重新加载时长和数值一致性尚需实际验证。
 
+## CPU 配额与复制诊断
+
+用户提供的 cpu.max 为 1152000/100000，即 11.52 核配额。新增按配额与 affinity 限制线程的实现和测试，以及不加载模型的复制带宽诊断脚本。没有将累计 CPU throttling 计数当作当前任务损失时间，也未将空闲 P8 下的 PCIe Gen1 判为硬件故障。复制带宽与线程设置对实际耗时的改善尚待远端测量。
+
+## Wan 接单格式兼容修复
+
+用户确认真实任务来自现有 Wan Lambda。修复 worker 仅接受嵌套 request、拒绝 Wan 平铺消息的问题；覆盖同种 S3 queued/request 格式的归一化和终态重复消息处理。增加源 Lambda 实际字段形状的本地测试，而非仅测试 H3 自产消息。校验失败新增字段/类型诊断，排除输入值与上下文。尚未读取用户出错的完整消息，不声称其所有字段均符合 H3 限制。
+
+接单契约对齐：兼容 Wan 配置变量，视频/状态路径分离，默认状态前缀 video/wan22/；S3 request 原样保存，回调字段与 Wan 相同。增加直接调用原始 Wan Lambda status.describe 读取 H3 写入状态的本地测试，未部署任何新 Lambda。参数 5 秒/720p/4 步/audio=false 已验证可被归一化接受。大规模统一项目重构按用户要求暂缓。
+
+本轮完整回归 69 项通过，无跳过；compileall、git diff --check 通过。
+
 benchmark 提供 `--resident --runs 2` 与 server 相同生命周期的验收入口。现有阶段冷加载路径仍可显式使用。GPU 实际显存回落、CPU RSS 稳定性和连续两单成片需在 Vast 主机验证。

@@ -3,20 +3,20 @@ import hmac
 import json
 import time
 from h3_service.net.http import request
+from h3_service.contracts.models import normalize_stored_request
 
 
 def payload(state):
     result = state.get('result', {})
-    requested = state['request']
+    requested = normalize_stored_request(state['request'], state['task_id'])
     return {'id': state['task_id'], 'task_id': state['task_id'], 'status': state['status'],
             'error': state.get('error'), 'video_url': state.get('video_url'),
             'duration': requested['duration'], 'resolution': requested['resolution'],
-            **{k: result.get(k, state.get('seed') if k == 'seed' else None)
-               for k in ('seed', 'width', 'height', 'num_frames', 'fps', 'actual_duration', 'audio_present')}}
+            'seed': result.get('seed', state.get('seed'))}
 
 
 def notify(state, settings, cancelled):
-    url = state['request'].get('webhook_url')
+    url = normalize_stored_request(state['request'], state['task_id']).get('webhook_url')
     if not url:
         return 'not_requested'
     body = json.dumps(payload(state), ensure_ascii=False, separators=(',', ':')).encode()

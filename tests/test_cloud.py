@@ -21,7 +21,7 @@ class CloudTests(unittest.TestCase):
 
     def test_missing_is_none(self):
         self.stub.add_client_error('get_object', service_error_code='NoSuchKey', http_status_code=404,
-                                  expected_params={'Bucket': 'test', 'Key': f'video/h3/status/{IDENT}.json'})
+                                  expected_params={'Bucket': 'test', 'Key': f'video/wan22/status/{IDENT}.json'})
         self.assertIsNone(self.store.read(IDENT))
         self.stub.assert_no_pending_responses()
 

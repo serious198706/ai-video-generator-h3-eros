@@ -18,12 +18,15 @@ def validate_wire(embeds, tags):
 
 def execute(mode, job, settings, progress=None, loaded_pipe=None):
     emit = progress or (lambda message: None)
+    from h3_service.infer.cpu_budget import configure_environment, configure_torch
+    configure_environment()
     emit('importing runtime dependencies')
     if mode == 'probe-runtime':
         from h3_service.check_runtime import check_runtime
         emit('checking driver, CUDA BF16 and cuDNN kernels')
         return check_runtime(settings.attention)
     import torch
+    emit(f'CPU intra-op thread budget: {configure_torch()}')
     from safetensors.torch import save_file
     from safetensors import safe_open
     from h3_service.infer.blocks import load_pipeline

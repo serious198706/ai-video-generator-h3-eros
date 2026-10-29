@@ -5,7 +5,8 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from h3_service.contracts.models import Message, frame_count
+from pydantic import ValidationError
+from h3_service.contracts.models import Message, frame_count, normalize_stored_request, validation_summary
 from h3_service.infer.engine import GenerationError, LeaseLost
 from h3_service.infer.manifest import fingerprint
 from h3_service.media.cloud import now
@@ -47,6 +48,7 @@ class Worker:
             verify_queue(self.settings, self.sqs)
             self.engine.preflight(self.cancelled)
             self.ready = True
+            LOG.info('worker ready; model initialization complete; waiting for SQS tasks')
             while not self.stop.is_set():
                 try:
                     messages = self.sqs.receive_message(QueueUrl=self.settings.queue_url, MaxNumberOfMessages=1,
@@ -79,15 +81,28 @@ class Worker:
 
     def handle(self, message):
         # Invalid envelopes are never silently deleted: SQS redrive policy must move them to a DLQ.
-        envelope = Message.model_validate_json(message['Body'])
+        try:
+            envelope = Message.model_validate_json(message['Body'])
+        except ValidationError as exc:
+            LOG.error('SQS message rejected; fields=%s; input values omitted; message retained for DLQ',
+                      json.dumps(validation_summary(exc)))
+            raise
         ident, request = envelope.task_id, envelope.request
         receipt = message['ReceiptHandle']
         state = self.store.read(ident)
         requested = request.model_dump()
-        if state and state.get('request') != requested:
-            raise ValueError('task identity/request conflict')
+        if state:
+            try:
+                stored_request = normalize_stored_request(state.get('request'), ident)
+            except ValidationError as exc:
+                LOG.error('stored task request rejected task=%s fields=%s', ident, json.dumps(validation_summary(exc)))
+                raise
+            if stored_request != requested:
+                raise ValueError('task identity/request conflict')
         if state is None:
-            state = {'task_id': ident, 'request': requested, 'status': 'pending', 'created_at': now()}
+            wire = json.loads(message['Body'])
+            state = {'task_id': ident, 'request': wire if 'request' not in wire else requested,
+                     'status': 'pending', 'created_at': now()}
         state.setdefault('seed', request.seed if request.seed is not None else secrets.randbelow(2**63))
         self.current = ident
         lock = threading.RLock()

@@ -2,6 +2,8 @@
 
 日期：2026-10-29。本文的“首版”“应”“计划”均为设计约定，不代表功能已经实现。
 
+接入修订（优先于本文早期的独立 Lambda/独立队列设想）：用户明确继续使用已经部署的 Wan Lambda，不新增 H3 Lambda。worker 兼容 Wan 平铺消息、原始 S3 request 和旧回调字段；默认状态前缀对齐 video/wan22/。视频前缀可单独配置。统一 task/runner 与 generator adapter 结构后续再做。
+
 实现补充：server 已改为独立常驻模型子进程，两套模型 CPU 常驻，按阶段切换 GPU；Eros 每个进程生命周期转换一次。显式 cold 模式保留每阶段退出行为。远程自有 conditioner 仍为后续选项。具体已完成范围见 VALIDATION.md。
 
 ## 1. 目标与范围
