@@ -2,6 +2,20 @@
 
 ## 当前运行方式
 
+性能修订：ResidentModels 保留冻结参数的 CPU 存储，卸载时重新绑定 CPU Parameter 并释放 GPU 副本，避免整模型 D2H 回拷；可变 registered buffers 仍拷回，保留其当前值。保留 tied parameter 关系，不支持训练、运行中权重编辑/LoRA 切换或 torch.compile。开始加载大模型前，执行小型 CUDA 检查：共享参数、可变 buffer、三次设备切换后的 GPU 输出必须完全一致，否则启动失败。
+
+condition 完成后释放其 GPU 参数副本，generate 完成后保留生成器在 GPU，立即交还成片供上传/回调；下一单 condition 前才释放生成器副本。下一单计时包含 previous_model_release_s，不能通过推迟释放来虚报吞吐提升。CPU 权重保留会使 GPU 阶段仍占用模型的 CPU 存储；原有 RAM 预算检查仍有效。GPU 空闲但权重驻留会有较高显存占用，这是本模式预期行为。
+
+release 指标细分 parameter_restore_s、buffer_restore_s、synchronize_s、gc_s、empty_cache_s，便于核查原 offload_s 的时间到底花在回拷还是清理。CPU 参数存储复用的数值/共享关系已做本地 CPU/meta 测试，完整 H3 的真实 GPU 连续结果与速度仍待验收，不能以小模型检查代替完整画质测试。
+
+一次性硬件/软件诊断（在当前旧版 server 无任务、GPU 权重已回 CPU 时运行，无需重启）：
+
+```bash
+.venv/bin/python -m scripts.hardware_report --output /workspace/h3-hardware-report
+```
+
+输出目录必须不存在。可加 --pid 指定当前 resident PID，仅采集其状态/内存/I/O，不读取命令行或环境变量。报告包含 CPU 配额/affinity/NUMA、内存/缺页计数、驱动/CUDA/库版本、PCIe 信息、256 MiB 预分配/分配式 H2D/D2H（pageable/pinned，单线程与预算线程）及 64 张量分配复制、小模型 CUDA 恢复检查。无 AWS 调用、无模型下载或加载，无队列操作；会短暂占用不到数 GiB 的 GPU/CPU 内存。检测到 GPU 已占用超过 4 GiB 时拒绝跑复制，保存失败报告，不与生成任务抢卡。脚本使用现有 PyTorch，当前不需要额外 pip 包或改驱动。
+
 更新：server 现在默认 `H3_MODEL_LIFETIME=resident`。父进程仅负责接单，专用推理子进程常驻 conditioner 和 Eros generator 的 CPU 权重；启动完成权重校验、加载、按需 Eros 转换和两侧 GPU 放置探测后 ready。每单只做 CPU/GPU 搬运、编码和推理，不再从磁盘重新加载模型或重新转换 Eros。两套未量化模型不会同时放上 GPU。下面关于逐阶段子进程/每单冷加载的说明仅适用于显式 `H3_MODEL_LIFETIME=cold` 和未加 `--resident` 的 benchmark。
 
 常驻启动要求有效可用 RAM 至少 160 GiB，可用 `H3_RESIDENT_MIN_RAM_GIB` 调整；加载后/每单开始前保留至少 16 GiB 有效可用量。有效可用量取主机 MemAvailable 与 cgroup 剩余配额加 inactive_file 可回收缓存的较小值，这是容量估计，不保证未来无 OOM。内存不足明确失败，不自动退到冷加载。已提供的 Vast 容器上限约 342 GiB、当前约 180 GiB，不能按宿主机 1 TiB 预算。
@@ -107,6 +121,12 @@ S3 使用 KMS 时另需相应密钥权限。视频前缀可经 CDN 服务，状�
 默认 visibility=600 秒，每 60 秒续租。续租或状态 heartbeat 失败时，worker 取消当前 GPU 子进程、停止接单并退出 ready；由运维重启，不能在未知执行权下继续生成。尚未提供多 worker fencing，禁止水平扩容。
 
 ## 恢复与排错
+
+每条投递有 `request task=... params={...}` 和最终 `timing task=... status=... error=... total_s=... sqs_deleted=... callback=... details={...}`。请求摘要包括 duration/resolution/steps/quality/audio、实际 seed、重投次数、提示词字符数/摘要以及图片/回调域名和 URL 摘要，不包含正文、URL 查询参数或凭证。每个计时步骤有 stage start/end，失败也记录耗时；最终 stages_s 包括校验、状态读写、下载、图片准备、生成、上传、回调和 SQS 删除。status_write 与 generation 中的阶段回写会嵌套计时，不要直接把所有字段相加。
+
+generation 中分 condition/generate，包含 wall_s、load_s、transfer_to_gpu_s、conditioning_s、denoise_s、video_decode_s、audio_decode_s、validate_export_s、offload_s（有相应阶段时）及显存峰值。GPU block 计时在边界同步 CUDA，有少量观测开销；不把这些计时与旧版异步计时直接当作性能 A/B。错误会保留安全的异常类型、调用栈位置和 AWS 诊断，不含底层消息中的 URL。
+
+server 日志同时输出终端和 logs/h3.log（H3_LOG_DIR 可修改），按午夜滚动，保留 30 份。更新这些 Python 代码需下次启动生效，不必重新安装依赖或下载权重。
 
 任务生命周期日志现覆盖：SQS 收到、校验/接单、读取及写入状态、首尾图下载及重试、画布处理、生成阶段/耗时、上传、回调每次 HTTP 响应、重复终态跳过、receive 上限失败、DeleteMessage 前后和任务总耗时。以 task_id 关联，不打印提示词、图片/回调 URL 或 receipt handle。空队列每约 60 秒输出轮询仍存活，长任务按续租间隔输出阶段。/health 增加 task_stage、received_messages、deleted_messages、last_task（终态/错误/耗时）。
 

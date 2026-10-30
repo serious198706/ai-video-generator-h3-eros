@@ -24,6 +24,14 @@ class TaskLoggingTests(unittest.TestCase):
         self.assertEqual(self.worker.received_messages, 1)
         self.assertEqual(self.worker.deleted_messages, 1)
         self.assertEqual(self.worker.last_task['status'], 'succeeded')
+        self.assertIn('request task=', logs)
+        self.assertIn('prompt_chars', logs)
+        self.assertIn('timing task=', logs)
+        self.assertIn('status=succeeded', logs)
+        self.assertIn('total_s=', logs)
+        self.assertIn('"status_write"', logs)
+        self.assertIn('"generation"', logs)
+        self.assertIn('"upload"', logs)
 
     def test_failed_download_logs_error_and_no_generation_then_terminal_ack(self):
         from h3_service.net.http import UrlError
@@ -36,3 +44,17 @@ class TaskLoggingTests(unittest.TestCase):
         self.assertNotIn('generation start', logs)
         self.assertIn('SQS message deleted', logs)
         self.assertEqual(self.worker.last_task['error'], 'download_failed')
+        self.assertIn('status=failed', logs)
+        self.assertIn('total_s=', logs)
+
+    def test_storage_failure_also_has_summary_with_task_stage_and_retained_message(self):
+        self.store.fail_read = True
+        with self.assertLogs('h3_service', level='INFO') as captured:
+            with self.assertRaises(OSError):
+                self.run_job()
+        logs = '\n'.join(captured.output)
+        self.assertIn('timing task=', logs)
+        self.assertIn('status=retry_pending', logs)
+        self.assertIn('"failed_stage": "status_read"', logs)
+        self.assertIn('sqs_deleted=False', logs)
+        self.assertNotIn(self.request.image, logs)

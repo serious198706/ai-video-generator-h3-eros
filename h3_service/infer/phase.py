@@ -16,7 +16,7 @@ def validate_wire(embeds, tags):
         raise ValueError('invalid conditioner output')
 
 
-def execute(mode, job, settings, progress=None, loaded_pipe=None):
+def execute(mode, job, settings, progress=None, loaded_pipe=None, already_on_gpu=False):
     emit = progress or (lambda message: None)
     from h3_service.infer.cpu_budget import configure_environment, configure_torch
     configure_environment()
@@ -39,11 +39,12 @@ def execute(mode, job, settings, progress=None, loaded_pipe=None):
         raise RuntimeError('CUDA is required; no placeholder fallback')
     torch.cuda.set_device(0)
     free, total = torch.cuda.mem_get_info()
-    if free / 1024**3 < settings.min_free_gib:
+    if not already_on_gpu and free / 1024**3 < settings.min_free_gib:
         raise RuntimeError('insufficient free GPU memory')
     torch.cuda.reset_peak_memory_stats()
     conditioner = mode in ('condition', 'probe-condition')
     started = time.monotonic()
+    stages = {}
     pipe = loaded_pipe
     if pipe is None:
         pipe = load_pipeline(settings.model_dir, conditioner=conditioner, progress=emit)
@@ -54,8 +55,10 @@ def execute(mode, job, settings, progress=None, loaded_pipe=None):
             Path(job['directory'], 'conversion.json').write_text(json.dumps(report))
         pipe.transformer.set_attention_backend(settings.attention)
     emit('moving loaded model to GPU')
+    transfer_started = time.monotonic()
     pipe.to('cuda')
     torch.cuda.synchronize()
+    stages['transfer_to_gpu_s'] = time.monotonic() - transfer_started
     loaded = time.monotonic() - started
     if mode.startswith('probe-'):
         return {'load_s': loaded, 'total_gib': total / 1024**3}
@@ -68,7 +71,10 @@ def execute(mode, job, settings, progress=None, loaded_pipe=None):
     with torch.inference_mode():
         if conditioner:
             emit('encoding prompt and keyframe images')
+            encode_started = time.monotonic()
             state = pipe(prompt=job['prompt'], **common)
+            torch.cuda.synchronize()
+            stages['conditioning_s'] = time.monotonic() - encode_started
             embeds, tags = state.get('prompt_embeds').cpu().contiguous(), state.get('text_token_tags').cpu().contiguous()
             validate_wire(embeds, tags)
             if (int(state.get('width')), int(state.get('height'))) != (width, height):
@@ -84,14 +90,19 @@ def execute(mode, job, settings, progress=None, loaded_pipe=None):
                 embeds, tags = source.get_tensor('prompt_embeds'), source.get_tensor('text_token_tags')
             validate_wire(embeds, tags)
             emit('running denoising and video/audio decoding')
-            state = pipe(prompt_embeds=embeds.to('cuda'), text_token_tags=tags,
-                         num_frames=num_frames, num_inference_steps=job['steps'], output_type='np',
-                         generator=torch.Generator('cpu').manual_seed(job['seed']), **common)
+            from h3_service.infer.timing import generation_blocks
+            with generation_blocks(emit, stages):
+                state = pipe(prompt_embeds=embeds.to('cuda'), text_token_tags=tags,
+                             num_frames=num_frames, num_inference_steps=job['steps'], output_type='np',
+                             generator=torch.Generator('cpu').manual_seed(job['seed']), **common)
             emit('validating frames/audio and encoding MP4')
+            export_started = time.monotonic()
             export_video(state.get('videos')[0], state.get('audio')[0].cpu(), state.get('sampling_rate'),
                          directory / 'output.mp4', width, height, num_frames, job['audio'])
+            stages['validate_export_s'] = time.monotonic() - export_started
     torch.cuda.synchronize()
     return {'load_s': loaded if loaded_pipe is None else 0.0, 'transfer_s': loaded if loaded_pipe is not None else 0.0, 'compute_export_s': time.monotonic() - started,
+            'stages': stages,
             'peak_allocated_gib': torch.cuda.max_memory_allocated() / 1024**3,
             'peak_reserved_gib': torch.cuda.max_memory_reserved() / 1024**3}
 

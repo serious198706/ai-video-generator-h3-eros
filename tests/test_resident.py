@@ -21,7 +21,10 @@ class ResidentTests(unittest.TestCase):
             self.assertEqual(available_memory(root / 'meminfo', root), 100 * 1024**3)
 
     def test_consecutive_jobs_load_twice_and_convert_once(self):
+        import torch
         pipes = [MagicMock(), MagicMock()]
+        for pipe in pipes:
+            pipe.components = {'model': torch.nn.Linear(2, 2, bias=False)}
         blocks = MagicMock()
         blocks.load_pipeline.side_effect = pipes
         eros = MagicMock()
@@ -31,6 +34,7 @@ class ResidentTests(unittest.TestCase):
                 patch('h3_service.infer.resident.available_memory', return_value=220 * 1024**3), \
                 patch('torch.cuda.mem_get_info', return_value=(94 * 1024**3, 95 * 1024**3)), \
                 patch('torch.cuda.synchronize'), patch('torch.cuda.empty_cache'), \
+                patch('h3_service.infer.cpu_weights.validate_cuda', return_value='passed'), \
                 patch('h3_service.infer.phase.execute', return_value={'load_s': 0}) as execute:
             models = ResidentModels(Settings(converted_cache=False), lambda message: None)
             for _ in range(2):
@@ -43,7 +47,7 @@ class ResidentTests(unittest.TestCase):
             self.assertIs(execute.call_args_list[0].kwargs['loaded_pipe'], pipes[0])
             self.assertIs(execute.call_args_list[2].kwargs['loaded_pipe'], pipes[0])
             for pipe in pipes:
-                self.assertEqual([c.args[0] for c in pipe.to.call_args_list], ['cuda', 'cpu', 'cpu', 'cpu'])
+                self.assertEqual([c.args[0] for c in pipe.to.call_args_list], ['cuda'])
 
     def test_insufficient_container_memory_fails_before_loading(self):
         blocks = MagicMock()

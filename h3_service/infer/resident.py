@@ -42,10 +42,16 @@ class ResidentModels:
         from h3_service.infer.blocks import load_pipeline
         from h3_service.infer.eros import apply_eros
         from h3_service.infer.converted_cache import load_generator
+        from h3_service.infer.cpu_weights import CpuWeights, validate_cuda
         self.settings, self.emit = settings, emit
         self.pipes = {}
+        self.cpu_weights = {}
+        self.active_mode = None
+        self.last_release = {}
         # Initial budget is deliberately conservative and configurable; no silent cold fallback.
         self.check_memory(settings.resident_min_ram_gib)
+        emit('validating CPU parameter restore on CUDA before loading large models')
+        emit('CPU parameter restore CUDA check: ' + validate_cuda())
         for mode, conditioner in [('condition', True), ('generate', False)]:
             emit(f'loading resident {mode} into CPU memory')
             if conditioner:
@@ -54,13 +60,15 @@ class ResidentModels:
                 pipe, self.conversion = load_generator(settings, emit, load_pipeline, apply_eros)
                 pipe.transformer.set_attention_backend(settings.attention)
             self.pipes[mode] = pipe
+            self.cpu_weights[mode] = CpuWeights(pipe)
+            emit(f'CPU parameter storage retained mode={mode} GiB={self.cpu_weights[mode].bytes / 1024**3:.2f}')
             self.check_memory(16)
             emit(f'probing resident {mode} GPU placement')
             if torch.cuda.mem_get_info()[0] / 1024**3 < settings.min_free_gib:
                 raise RuntimeError('insufficient free GPU memory')
             pipe.to('cuda')
             torch.cuda.synchronize()
-            self.offload(pipe)
+            self.offload(pipe, mode)
         emit('resident models ready on CPU; Eros conversion completed once')
 
     def check_memory(self, required):
@@ -69,25 +77,51 @@ class ResidentModels:
         if free < required:
             raise RuntimeError('insufficient effective RAM for resident models')
 
-    def offload(self, pipe):
+    def offload(self, pipe, mode):
         import torch
-        self.emit('returning model weights to CPU')
-        pipe.to('cpu')
+        self.emit(f'restoring retained CPU weights mode={mode}; releasing GPU parameter copies')
+        started = time.monotonic()
         torch.cuda.synchronize()
+        sync_s = time.monotonic() - started
+        release = self.cpu_weights[mode].restore()
+        torch.cuda.synchronize()
+        started = time.monotonic()
         gc.collect()
+        gc_s = time.monotonic() - started
+        started = time.monotonic()
         torch.cuda.empty_cache()
+        self.last_release = {**release, 'synchronize_s': sync_s, 'gc_s': gc_s,
+                             'empty_cache_s': time.monotonic() - started}
+        self.emit(f'GPU release complete mode={mode} timing={json.dumps(self.last_release)}')
+        self.active_mode = None
 
     def run(self, mode, job):
         from h3_service.infer.phase import execute
         self.check_memory(16)
+        eviction_s = 0.0
+        eviction_details = {}
+        if self.active_mode is not None and self.active_mode != mode:
+            started = time.monotonic()
+            self.offload(self.pipes[self.active_mode], self.active_mode)
+            eviction_s = time.monotonic() - started
+            eviction_details = dict(self.last_release)
         pipe = self.pipes[mode]
         if mode == 'generate':
             atomic(Path(job['directory']) / 'conversion.json', self.conversion)
         # execute's state/tensors go out of scope before offload; on error the process exits.
-        result = execute(mode, job, self.settings, progress=self.emit, loaded_pipe=pipe)
+        result = execute(mode, job, self.settings, progress=self.emit, loaded_pipe=pipe,
+                         already_on_gpu=self.active_mode == mode)
+        self.active_mode = mode
         started = time.monotonic()
-        self.offload(pipe)
-        result.update(offload_s=time.monotonic() - started, resident=True)
+        if mode == 'condition':
+            self.offload(pipe, mode)
+            offload_s = time.monotonic() - started
+        else:
+            offload_s = 0.0
+            self.emit('video ready; generator stays on GPU until the next conditioning phase')
+        result.update(offload_s=offload_s, previous_model_release_s=eviction_s,
+                      release=dict(self.last_release) if mode == 'condition' else {},
+                      previous_model_release=eviction_details, gpu_retained=mode == 'generate', resident=True)
         return result
 
 
@@ -210,6 +244,7 @@ class ResidentEngine(Engine):
                 timings[mode] = self.wait_reply(reply, cancelled)
                 reply.unlink()
                 timings[mode]['wall_s'] = time.monotonic() - started
+                self.progress(f'phase timing phase={mode} metrics={json.dumps(timings[mode], sort_keys=True)}')
             return directory / 'output.mp4', {'model': MODEL_ID, 'timing': timings}
         except BaseException:
             self.close()

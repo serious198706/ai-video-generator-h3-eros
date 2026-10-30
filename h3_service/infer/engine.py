@@ -125,4 +125,5 @@ class Engine:
             start = time.monotonic()
             timings[mode] = self.phase(mode, directory, cancelled, file)
             timings[mode]['wall_s'] = time.monotonic() - start
+            self.progress(f'phase timing phase={mode} metrics={json.dumps(timings[mode], sort_keys=True)}')
         return directory / 'output.mp4', {'model': MODEL_ID, 'timing': timings}

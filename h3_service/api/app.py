@@ -7,11 +7,12 @@ from h3_service.infer.engine import Engine
 from h3_service.infer.resident import ResidentEngine
 from h3_service.media.cloud import Store, clients
 from h3_service.tasks.worker import Worker
+from h3_service.log import setup_logging
 
 
 @asynccontextmanager
 async def lifespan(app):
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
+    setup_logging()
     settings = Settings()
     settings.validate_cloud()
     settings.work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

@@ -15,6 +15,7 @@ from h3_service.media.images import prepare
 from h3_service.media.webhook import notify
 from h3_service.net.http import download, resolve
 from h3_service.aws_diagnostics import details
+from h3_service.tasks.trace import TaskTrace
 
 LOG = logging.getLogger(__name__)
 TERMINAL = {'succeeded', 'failed'}
@@ -114,7 +115,20 @@ class Worker:
             raise LeaseLost('worker stopped or lease uncertain')
 
     def handle(self, message):
-        started = time.monotonic()
+        trace = TaskTrace()
+        try:
+            return self._handle(message, trace)
+        except BaseException as exc:
+            if trace.status not in TERMINAL:
+                trace.status = 'cancelled' if isinstance(exc, LeaseLost) else 'retry_pending'
+            trace.failed_stage = trace.failed_stage or self.stage
+            trace.failure(exc)
+            raise
+        finally:
+            trace.finish()
+
+    def _handle(self, message, trace):
+        started = trace.started
         self.received_messages += 1
         self.stage = 'validate_message'
         LOG.info('SQS message received receive_count=%s body_bytes=%s; validating',
@@ -122,18 +136,21 @@ class Worker:
                  len(message.get('Body', '').encode()))
         # Invalid envelopes are never silently deleted: SQS redrive policy must move them to a DLQ.
         try:
-            envelope = Message.model_validate_json(message['Body'])
+            with trace.measure('validation'):
+                envelope = Message.model_validate_json(message['Body'])
         except ValidationError as exc:
             LOG.error('SQS message rejected; fields=%s; input values omitted; message retained for DLQ',
                       json.dumps(validation_summary(exc)))
             raise
         ident, request = envelope.task_id, envelope.request
+        trace.accept(ident, request, message.get('Attributes', {}).get('ApproximateReceiveCount', '1'))
         LOG.info('task accepted task=%s resolution=%s duration=%s steps=%s audio=%s callback_requested=%s',
                  ident, request.resolution, request.duration, request.steps, request.audio, bool(request.webhook_url))
         receipt = message['ReceiptHandle']
         self.stage = 'read_status'
         LOG.info('status read start task=%s', ident)
-        state = self.store.read(ident)
+        with trace.measure('status_read'):
+            state = self.store.read(ident)
         LOG.info('status read complete task=%s status=%s stage=%s', ident,
                  state.get('status') if state else 'missing', state.get('stage') if state else None)
         requested = request.model_dump()
@@ -150,6 +167,7 @@ class Worker:
             state = {'task_id': ident, 'request': wire if 'request' not in wire else requested,
                      'status': 'pending', 'created_at': now()}
         state.setdefault('seed', request.seed if request.seed is not None else secrets.randbelow(2**63))
+        trace.request['seed'] = state['seed']
         self.current = ident
         lock = threading.RLock()
         done = threading.Event()
@@ -158,7 +176,11 @@ class Worker:
             self.check()
             with lock:
                 state.update(changes)
-                self.store.write(state)
+                with trace.measure('status_write'):
+                    self.store.write(state)
+                trace.status, trace.error = state['status'], state.get('error')
+                if state.get('seed') is not None:
+                    trace.request['seed'] = state['seed']
                 self.stage = state.get('stage', self.stage)
                 LOG.info('status persisted task=%s status=%s stage=%s error=%s',
                          ident, state['status'], state.get('stage'), state.get('error'))
@@ -192,7 +214,8 @@ class Worker:
                 stamp = fingerprint(requested, state['seed'])
                 if recover_upload:
                     LOG.info('upload recovery check start task=%s', ident)
-                result = self.store.recover(ident, stamp) if recover_upload else None
+                with trace.measure('upload_recovery'):
+                    result = self.store.recover(ident, stamp) if recover_upload else None
                 if result is not None:
                     LOG.info('upload recovery found existing video task=%s; generation skipped', ident)
                     persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
@@ -200,33 +223,41 @@ class Worker:
                     LOG.warning('task receive limit reached task=%s limit=%s; marking failed without generation', ident, self.settings.max_receive)
                     persist(status='failed', error='poisoned', stage='complete')
                 else:
-                    self.execute(request, state, persist, stamp)
+                    self.execute(request, state, persist, stamp, trace)
             else:
                 LOG.info('terminal task redelivered task=%s status=%s; generation skipped', ident, state['status'])
+            trace.status, trace.error = state['status'], state.get('error')
             self.check()
             if state.get('callback') not in {'delivered', 'not_requested', 'exhausted'}:
                 LOG.info('callback processing start task=%s', ident)
-                outcome = notify(state, self.settings, self.cancelled)
+                with trace.measure('callback'):
+                    outcome = notify(state, self.settings, self.cancelled)
                 persist(callback=outcome)
                 LOG.info('callback processing complete task=%s outcome=%s', ident, outcome)
             else:
                 LOG.info('callback already resolved task=%s outcome=%s', ident, state['callback'])
             self.check()
+            trace.callback = state.get('callback')
             self.stage = 'delete_message'
             LOG.info('SQS delete start task=%s status=%s callback=%s', ident, state['status'], state.get('callback'))
-            self.sqs.delete_message(QueueUrl=self.settings.queue_url, ReceiptHandle=receipt)
+            with trace.measure('sqs_delete'):
+                self.sqs.delete_message(QueueUrl=self.settings.queue_url, ReceiptHandle=receipt)
+            trace.deleted = True
             self.deleted_messages += 1
             self.last_task = {'task_id': ident, 'status': state['status'], 'error': state.get('error'),
                               'elapsed_s': round(time.monotonic() - started, 3)}
             LOG.info('task complete; SQS message deleted task=%s status=%s error=%s elapsed_s=%.3f',
                      ident, state['status'], state.get('error'), time.monotonic() - started)
+        except BaseException:
+            trace.failed_stage = trace.failed_stage or self.stage
+            raise
         finally:
             done.set()
             heartbeat_thread.join(timeout=40)
             self.current = None
             self.stage = 'idle' if self.ready else 'not_ready'
 
-    def execute(self, request, state, persist, stamp):
+    def execute(self, request, state, persist, stamp, trace):
         ident = state['task_id']
         self.settings.work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         with tempfile.TemporaryDirectory(prefix=ident + '-', dir=self.settings.work_dir) as temp:
@@ -244,9 +275,11 @@ class Worker:
                                 LOG.info('image download start task=%s frame=%s attempt=%s', ident,
                                          'first' if path == first else 'last', attempt + 1)
                                 transfer_started = time.monotonic()
-                                download(url, path, self.settings.image_hosts)
+                                with trace.measure('download_first' if path == first else 'download_last'):
+                                    download(url, path, self.settings.image_hosts)
                                 LOG.info('image download complete task=%s frame=%s elapsed_s=%.3f bytes=%s',
                                          ident, 'first' if path == first else 'last', time.monotonic() - transfer_started, path.stat().st_size)
+                                trace.failed_stage = None  # A successful retry resolves earlier attempt failures.
                                 break
                             except Exception as exc:
                                 LOG.warning('image download failed task=%s attempt=%s details=%s', ident, attempt + 1, input_failure(exc))
@@ -254,12 +287,14 @@ class Worker:
                                 if attempt == 2:
                                     raise
                                 self.cancelled.wait(2**attempt)
-                first, last, width, height = prepare(first, last, request.resolution, directory)
+                with trace.measure('image_prepare'):
+                    first, last, width, height = prepare(first, last, request.resolution, directory)
                 LOG.info('images prepared task=%s width=%s height=%s last_frame=%s', ident, width, height, bool(last))
             except LeaseLost:
                 raise
             except Exception as exc:
                 LOG.error('task input/download failed task=%s details=%s; no generation', ident, input_failure(exc))
+                trace.failed_stage = trace.failed_stage or 'download_or_prepare'
                 persist(status='failed', stage='complete', error='download_failed')
                 return
             frames = frame_count(request.duration)
@@ -273,7 +308,9 @@ class Worker:
                 def on_stage(label):
                     LOG.info('generation stage start task=%s stage=%s', ident, label)
                     persist(stage=label)
-                output, metrics = self.engine.generate(job, directory, self.cancelled, on_stage)
+                with trace.measure('generation'):
+                    output, metrics = self.engine.generate(job, directory, self.cancelled, on_stage)
+                trace.metrics = metrics.get('timing', {})
                 LOG.info('generation complete task=%s elapsed_s=%.3f timing=%s', ident,
                          time.monotonic() - generation_started, json.dumps(metrics.get('timing', {})))
             except GenerationError as exc:
@@ -288,6 +325,7 @@ class Worker:
             self.stage = 'upload'
             upload_started = time.monotonic()
             LOG.info('S3 video upload start task=%s', ident)
-            self.store.upload(ident, output, result, stamp)
+            with trace.measure('upload'):
+                self.store.upload(ident, output, result, stamp)
             LOG.info('S3 video upload complete task=%s elapsed_s=%.3f', ident, time.monotonic() - upload_started)
             persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
