@@ -110,3 +110,13 @@ benchmark 每轮记录 generation_wall_s 并即时打印全阶段指标，下一
 生成器 blocks 0、1、48、49 保持 BF16，conditioner lm_head、VAE/audio VAE 不量化。单元测试覆盖筛选策略、双模型各量化/放置一次、连续两阶段不释放且执行时标记 already_on_gpu。首次 Vast runtime probe 暴露 TorchAO 0.17 v2 不接受 `group_size` 与 `version=2` 同时使用；已改为等价的 `granularity=PerGroup(128)`，并增加参数构造回归测试。本分支完整本地回归 90 项通过，compileall 和 diff check 通过。真实 RTX PRO 6000 上的静态显存、TorchAO kernel 性能、完整成片质量仍需本分支首次实测。
 
 第二次 Vast 启动在 Qwen3-VL 实际 Linear 上暴露输入维度不能被 group 128 整除。筛选现在只量化 `weight.shape[-1] % 128 == 0` 的 Linear，不兼容层保留 BF16；报告和日志记录其数量及 FQN。增加不兼容尺寸回归测试，完整回归现为 91 项。resident 启动失败回复现在包含受限的内部异常详情；任务执行期继续不回显异常正文。
+
+### Vast 双常驻实测（2026-10-30）
+
+用户提供 `/workspace/h3-int8-20261030-091857`：RTX PRO 6000 Blackwell Max-Q、Torch 2.11.0+cu130、TorchAO 0.17.0+cu130。768×1344、124 帧、4 步、seed 42、无输出音轨，连续两轮均成功。
+
+- preflight（含加载、CPU 量化和双模型上卡）626.128 秒；conditioner 537 个 Linear 量化 134.486 秒，27 个视觉 MLP fc2 因输入维度不整除 128 保留 BF16；generator 340 个 Linear 量化 112.804 秒，proj_in/audio_proj_in 保留 BF16。
+- 第一轮 generation_wall_s 86.389：condition 2.255、generate 84.133 秒；第二轮 81.876：condition 1.252、generate 80.623 秒。两轮 condition/generate 的 gpu_transfer 均为 0 且 skipped=true，offload 和 previous_model_release 均为 0，证明单卡双常驻已实际生效。
+- 去噪 54.867/55.575 秒，视频解码 22.315/18.489 秒，导出 5.581/5.689 秒。与此前 BF16 样本的去噪 56.914/56.850 秒接近，INT8WO 本次主要收益是消除模型切换，并未显示核心算子明显加速。
+- 生成阶段峰值 allocated 84.798 GiB、reserved 92.510 GiB，总显存 94.970 GiB。两轮没有持续增长，但 reserved 余量仅约 2.46 GiB；该样本不能证明更长时长或其他画布不会 OOM。
+- 两个 MP4 文件 SHA-256 完全相同，解码后逐帧校验也完全相同。两者均为 H.264 yuv420p、768×1344、24 fps、124 帧、5.166667 秒，无音频 stream；抽取首/四分位/中间/末帧未见黑片、冻结或明显结构损坏。尚无相同输入和 seed 的 BF16 成片，不能据此判断 INT8WO 相对 BF16 的细节/运动质量差异。
