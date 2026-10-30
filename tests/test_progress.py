@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import tempfile
 import threading
@@ -78,3 +79,24 @@ class ProgressTests(unittest.TestCase):
                 self.assertEqual(benchmark.main(), 1)
             for name in ('job.json', 'conditioning.safetensors', 'report.json'):
                 self.assertEqual((output / name).read_text(), 'keep')
+
+    def test_benchmark_reports_request_validation_fields(self):
+        import benchmark
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            prompt = root / 'prompt.txt'
+            prompt.write_text('a calm landscape')
+            output = root / 'invalid-request'
+            stderr = io.StringIO()
+            with patch('sys.argv', ['benchmark.py', '--image', str(root / 'image.png'),
+                                   '--prompt-file', str(prompt), '--output', str(output),
+                                   '--resolution', '1080p', '--duration', '15']), \
+                    patch('sys.stderr', stderr):
+                self.assertEqual(benchmark.main(), 2)
+            self.assertFalse(output.exists())
+            message = stderr.getvalue()
+            self.assertIn('Request validation failed', message)
+            self.assertIn('duration', message)
+            self.assertIn('less than or equal to 14', message)
+            self.assertIn('resolution', message)
+            self.assertIn("540p' or '720p", message)

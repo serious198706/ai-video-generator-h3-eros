@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from pydantic import ValidationError
 from h3_service.config import Settings
 from h3_service.contracts.models import GenerateRequest, frame_count
 from h3_service.infer.engine import Engine
@@ -121,9 +122,22 @@ def main():
         report.update(status='succeeded', **metrics)
         log(f'Generation succeeded: {video_path} ({video_path.stat().st_size / 1024**2:.1f} MiB)')
         return 0
+    except ValidationError as exc:
+        validation_errors = [
+            {
+                'field': '.'.join(str(part) for part in item['loc']),
+                'type': item['type'],
+                'message': item['msg'],
+            }
+            for item in exc.errors(include_url=False, include_context=False, include_input=False)
+        ]
+        report.update(status='failed', error='ValidationError', validation_errors=validation_errors)
+        log(f'Request validation failed: {json.dumps(validation_errors, ensure_ascii=False)}', error=True)
+        return 2
     except Exception as exc:
         report.update(status='failed', error=type(exc).__name__)
-        log(f'Benchmark failed: {type(exc).__name__}; partial artifacts retained in {output}', error=True)
+        suffix = f'; partial artifacts retained in {output}' if output_created else ''
+        log(f'Benchmark failed: {type(exc).__name__}{suffix}', error=True)
         return 1
     finally:
         if engine is not None:
