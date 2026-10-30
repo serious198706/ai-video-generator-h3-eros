@@ -8,7 +8,7 @@ condition 完成后释放其 GPU 参数副本，generate 完成后保留生成�
 
 release 指标细分 parameter_restore_s、buffer_restore_s、synchronize_s、gc_s、empty_cache_s，便于核查原 offload_s 的时间到底花在回拷还是清理。CPU 参数存储复用的数值/共享关系已做本地 CPU/meta 测试，完整 H3 的真实 GPU 连续结果与速度仍待验收，不能以小模型检查代替完整画质测试。
 
-一次性硬件/软件诊断（在当前旧版 server 无任务、GPU 权重已回 CPU 时运行，无需重启）：
+一次性硬件/软件诊断（停止使用 GPU 的服务后运行）：
 
 ```bash
 .venv/bin/python -m scripts.hardware_report --output /workspace/h3-hardware-report
@@ -26,8 +26,11 @@ release 指标细分 parameter_restore_s、buffer_restore_s、synchronize_s、gc
 
 ```bash
 python benchmark.py --resident --runs 2 --image /workspace/test1.jpg \
-  --prompt-file /workspace/prompt.txt --output /workspace/h3-resident-check
+  --prompt-file /workspace/prompt.txt --resolution 720p --duration 5 --steps 4 \
+  --seed 42 --output /workspace/h3-resident-check
 ```
+
+先停止当前 server，加载与 start.sh 相同的 .env 和 worker-env.sh 后执行上述命令。报告的 preflight_s 是启动开销；runs 每轮的 generation_wall_s 是生成总耗时。第二轮包含上一轮生成器的释放，需与第一轮一起看。输出目录需为新目录。此测试不访问队列，完成后用 start.sh 启动服务。
 
 该入口和 server 复用同一个 ResidentEngine，第二单应无模型读盘/权重转换阶段；仍会记录 GPU 搬运与回 CPU 耗时。首次算子初始化仍可能使第一单更慢。该模式会在 benchmark 结束时关闭常驻进程；server 则保留至停止或异常。
 

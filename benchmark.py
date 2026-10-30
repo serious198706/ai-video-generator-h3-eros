@@ -95,18 +95,23 @@ def main():
             if stage_name is not None:
                 log(f'Stage finished: {stage_name} ({now - stage_started:.1f}s)')
             stage_name, stage_started = stage, now
-            log(f'Stage started: {stage} (includes cold model loading)')
+            log(f'Stage started: {stage}; resident={args.resident}')
 
         measurements = []
         for run in range(args.runs):
+            stage_name = stage_started = None
             run_directory = output if args.runs == 1 else output / f'run-{run + 1:02d}'
             run_directory.mkdir(exist_ok=True, mode=0o700)
             log(f'Generation {run + 1}/{args.runs}; resident={args.resident}')
+            run_started = time.monotonic()
             video_path, metrics = engine.generate(job, run_directory, cancelled, on_stage)
+            metrics['generation_wall_s'] = time.monotonic() - run_started
+            if stage_name is not None:
+                log(f'Stage finished: {stage_name} ({time.monotonic() - stage_started:.1f}s)')
+            log(f'Generation {run + 1}/{args.runs} complete in {metrics["generation_wall_s"]:.3f}s; '
+                f'phase timing={json.dumps(metrics.get("timing", {}), sort_keys=True)}')
             measurements.append(metrics)
             report['runs'] = measurements
-        if stage_name is not None:
-            log(f'Stage finished: {stage_name} ({time.monotonic() - stage_started:.1f}s)')
         for phase, timing in metrics.get('timing', {}).items():
             log(f'{phase} timing: load={timing.get("load_s", 0):.1f}s, '
                 f'compute_export={timing.get("compute_export_s", 0):.1f}s, '
@@ -128,8 +133,9 @@ def main():
         report['total_s'] = time.monotonic() - total_started
         # The temporary prompt and embedding files are not part of the benchmark artifact.
         if output_created:
-            for name in ('job.json', 'conditioning.safetensors'):
-                (output / name).unlink(missing_ok=True)
+            for folder in [output, *output.glob('run-*')]:
+                for name in ('job.json', 'conditioning.safetensors'):
+                    (folder / name).unlink(missing_ok=True)
             report_path = output / 'report.json'
             report_path.write_text(json.dumps(report, indent=2))
             log(f'Report written: {report_path}')

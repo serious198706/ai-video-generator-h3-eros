@@ -12,29 +12,37 @@ from pathlib import Path
 from h3_service.infer.cpu_budget import configure_environment, configure_torch
 
 
-def command(args):
+def command(args, *, stdout_limit=40000):
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=20)
-        return {'returncode': result.returncode, 'stdout': result.stdout[:40000], 'stderr': result.stderr[:2000]}
+        return {'returncode': result.returncode, 'stdout': result.stdout[:stdout_limit],
+                'stdout_truncated': len(result.stdout) > stdout_limit, 'stderr': result.stderr[:2000]}
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {'error': type(exc).__name__}
 
 
 def gpu_info():
-    result = command(['nvidia-smi', '-q', '-x'])
+    result = command(['nvidia-smi', '-q', '-x'], stdout_limit=1024**2)
     if result.get('returncode') != 0:
         return result
+    if result.get('stdout_truncated'):
+        return {'error': 'nvidia-smi XML exceeded 1 MiB capture limit'}
     try:
         root = ET.fromstring(result['stdout'])
     except ET.ParseError:
         return {'error': 'nvidia-smi XML invalid or exceeded bounded capture'}
+    def fields(node):
+        # Preserve nesting: link_gen/current_link_gen and link_widths/current_link_width
+        # must not overwrite their maximum values in a flat dictionary.
+        return {child.tag: fields(child) if len(child) else child.text for child in node}
+
     output = {'driver_version': root.findtext('driver_version'), 'gpus': []}
     for gpu in root.findall('gpu'):
         entry = {'name': gpu.findtext('product_name'), 'performance_state': gpu.findtext('performance_state')}
         for section in ('pci', 'fb_memory_usage', 'utilization', 'gpu_power_readings', 'power_readings', 'clocks'):
             node = gpu.find(section)
             if node is not None:
-                entry[section] = {child.tag: child.text for child in node.iter() if len(child) == 0}
+                entry[section] = fields(node)
         output['gpus'].append(entry)
         bus = entry.get('pci', {}).get('pci_bus_id')
         if bus:

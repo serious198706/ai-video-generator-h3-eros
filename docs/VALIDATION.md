@@ -74,3 +74,17 @@ Wan 风格日志增强：统一请求摘要和每次投递最终 timing 汇总�
 增加 hardware_report 单次诊断和实际 CUDA 小模型一致性检查（需要 Vast 执行，本机未执行 CUDA）。生产启动也会在昂贵加载前执行该检查。尚未验证完整 H3 共享参数恢复后的 GPU 数值/画质和实际提速；没有承诺此次改动可将整单降到某个秒数。
 
 benchmark 提供 `--resident --runs 2` 与 server 相同生命周期的验收入口。现有阶段冷加载路径仍可显式使用。GPU 实际显存回落、CPU RSS 稳定性和连续两单成片需在 Vast 主机验证。
+
+## Vast 复制诊断结果（2026-10-30）
+
+用户提供实际机器报告：PyTorch 2.11.0+cu130、CUDA runtime 13.0、cuDNN 91900，编译架构含 sm_120。8 线程下，256 MiB 复制中位带宽分别为：pageable 预分配 H2D 9.304 GiB/s、D2H 6.788 GiB/s；pinned 预分配 H2D 20.840 GiB/s、D2H 22.364 GiB/s；新分配目标的 D2H 仅 0.654–0.685 GiB/s。1 线程分配式 D2H 同样为 0.641–0.651 GiB/s。因此瓶颈证据指向新 CPU 目标分配加回拷这条路径，不能将其归为 PCIe 只有 0.65 GiB/s。小块基准不能精确预测 60+ GiB 模型的搬运时间。
+
+诊断期间 cpu.stat 的 nr_throttled 始终为 1，没有新增 CPU 限流；CPU quota 仍为 11.52 核。NUMA 有两节点，GPU 位于 node0；该报告没有做跨 NUMA 对照，不能将其判断为根因。无需基于本报告更换驱动、CUDA 或 requirements。
+
+实际 CUDA 小模型恢复检查已通过：共享参数、可变 buffer、连续三轮切换后 GPU 输出完全一致。这验证恢复机制在部署版本 Torch/CUDA 上可用；完整 H3 两轮性能和成片仍需实测。
+
+报告中 GPU XML 采集失败是诊断脚本将 stdout 截为 40000 字符造成，不能视为 GPU/驱动错误。现将该项上限单独提高至 1 MiB，显式标记截断，并保留 PCIe 字段嵌套关系；测试覆盖超过旧上限的驱动 XML 和截断失败。
+
+benchmark 每轮记录 generation_wall_s 并即时打印全阶段指标，下一轮独立开始阶段计时；重复运行的临时 embedding 文件同样清理。验收需同时观察第二轮 condition.previous_model_release_s，不能将延迟的生成器释放从吞吐时间中漏掉。
+
+本次本地完整回归 83 项通过；compileall 和 git diff --check 通过。测试环境为本机 CPU，完整 H3 GPU 复测尚未执行。
