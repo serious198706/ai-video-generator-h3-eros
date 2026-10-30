@@ -172,9 +172,11 @@ def serve(directory):
     def emit(stage):
         atomic(progress, {'stage': stage})
     reply = directory / 'ready.json'
+    startup = True
     try:
         emit('importing resident model dependencies')
         models = ResidentModels(Settings(), emit)
+        startup = False
         atomic(reply, {'ok': True})
         command = directory / 'command.json'
         while True:
@@ -188,9 +190,12 @@ def serve(directory):
             atomic(reply, {'ok': True, 'result': result})
     except Exception as exc:
         import traceback
-        atomic(reply, {'ok': False, 'error': type(exc).__name__,
-                       'trace': [{'file': Path(f.filename).name, 'line': f.lineno, 'function': f.name}
-                                 for f in traceback.extract_tb(exc.__traceback__)]})
+        failure = {'ok': False, 'error': type(exc).__name__,
+                   'trace': [{'file': Path(f.filename).name, 'line': f.lineno, 'function': f.name}
+                             for f in traceback.extract_tb(exc.__traceback__)]}
+        if startup:
+            failure['detail'] = str(exc)[:500]
+        atomic(reply, failure)
         return 1
 
 
