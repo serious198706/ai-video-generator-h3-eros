@@ -35,14 +35,17 @@ class Settings:
     phase_timeout: int = field(default_factory=lambda: int(os.getenv('H3_PHASE_TIMEOUT', '3600')))
     min_free_gib: float = field(default_factory=lambda: float(os.getenv('H3_MIN_FREE_GIB', '88')))
     resident_min_ram_gib: float = field(default_factory=lambda: float(os.getenv('H3_RESIDENT_MIN_RAM_GIB', '160')))
+    dual_min_free_gib: float = field(default_factory=lambda: float(os.getenv('H3_DUAL_MIN_FREE_GIB', '8')))
     model_lifetime: str = field(default_factory=lambda: os.getenv('H3_MODEL_LIFETIME', 'resident'))
     verify_mode: str = field(default_factory=lambda: os.getenv('H3_VERIFY_MODE', 'cached'))
     transformer_cache: Path = field(default_factory=lambda: Path(os.getenv('H3_TRANSFORMER_CACHE', str(ROOT / 'models/converted'))))
     converted_cache: bool = field(default_factory=lambda: os.getenv('H3_CONVERTED_CACHE', '1') == '1')
 
     def validate_cloud(self):
-        if self.model_lifetime not in {'resident', 'cold'}:
-            raise ValueError('H3_MODEL_LIFETIME must be resident or cold')
+        if self.model_lifetime not in {'resident', 'cold', 'dual_int8'}:
+            raise ValueError('H3_MODEL_LIFETIME must be resident, dual_int8 or cold')
+        if self.dual_min_free_gib < 0:
+            raise ValueError('H3_DUAL_MIN_FREE_GIB must be nonnegative')
         if not self.bucket or not self.queue_url or not self.public_base.startswith('https://'):
             raise ValueError('H3_S3_BUCKET, H3_QUEUE_URL and HTTPS H3_PUBLIC_BASE_URL are required')
         if not self.prefix.strip('/'):

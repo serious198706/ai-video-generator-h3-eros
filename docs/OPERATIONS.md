@@ -1,6 +1,39 @@
 # 运行与接入
 
+独立验收导出（使用合成渐变素材，768×1344 / 124 帧，无模型加载和 GPU 使用）：
+
+```bash
+.venv/bin/python -m scripts.benchmark_export --output "/workspace/h3-export-$(date +%Y%m%d-%H%M%S)"
+```
+
+生成 synthetic.mp4 和 report.json。此素材压缩复杂度低，结果仅检查导出链路，不代表真实生成画面的编码速度。完整推理中同样输出逐帧进度，以及转换、视频编码、音频编码、封装和 ffprobe 检查各项耗时。上卡阶段另外记录缺页、实际读盘字节和 CPU 时间差值，区分数据重读与复制开销。
+
 ## 当前运行方式
+
+### 实验：单卡双模型 INT8WO 常驻
+
+分支 `experiment/dual-int8wo` 提供 TorchAO INT8 weight-only 实验模式。Qwen3-VL conditioner 的 Linear 层和 Eros generator 的绝大多数 Linear 层在 CPU 加载后量化，H3 transformer 的 blocks 0、1、48、49、conditioner 的 lm_head、两个 VAE 继续使用原精度。两套 pipeline 随后同时放入 GPU，任务阶段的 `gpu_transfer.wall_s` 应为 0 且带 `skipped=true`。
+
+`.env` 设置：
+
+```bash
+H3_MODEL_LIFETIME=dual_int8
+H3_DUAL_MIN_FREE_GIB=8
+```
+
+requirements 变化会使 `deploy.sh` 安装 `torchao==0.17.0`。部署期 runtime check 先在真实 CUDA 上执行一个 CPU 量化、移至 GPU、BF16 输入的 INT8WO Linear，失败时不会开始加载大模型。首次启动仍需加载/转换已有 beta5 权重并在 CPU 量化；本实验暂未持久化 TorchAO tensor-subclass checkpoint，重启会重新量化。
+
+双常驻启动逐个打印量化层数、量化耗时，以及每套模型上卡后的 allocated/reserved/free GiB。两套模型上卡后若空闲显存少于 `H3_DUAL_MIN_FREE_GIB`，启动失败。运行期不会退回 BF16 搬运模式。生成目录写入 `quantization.json`，状态 timing 的 condition/generate 均带 `quantization=dual_int8wo`、`offload_s=0`。
+
+使用新输出目录做两轮固定输入验收：
+
+```bash
+python benchmark.py --resident --runs 2 --image /workspace/test1.jpg \
+  --prompt-file /workspace/prompt.txt --resolution 720p --duration 5 --steps 4 \
+  --seed 42 --output "/workspace/h3-int8-$(date +%Y%m%d-%H%M%S)"
+```
+
+验收重点：启动后 free GiB 必须达到设定值；两轮不能出现 OOM/非有限输出；两阶段 transfer 均为 0；记录 denoise、decode、export、generation_wall_s，并与同输入 BF16 成片进行人工画质比较。INT8WO 只承诺减少模型显存和切换，不预设单步一定更快。
 
 性能修订：ResidentModels 保留冻结参数的 CPU 存储，卸载时重新绑定 CPU Parameter 并释放 GPU 副本，避免整模型 D2H 回拷；可变 registered buffers 仍拷回，保留其当前值。保留 tied parameter 关系，不支持训练、运行中权重编辑/LoRA 切换或 torch.compile。开始加载大模型前，执行小型 CUDA 检查：共享参数、可变 buffer、三次设备切换后的 GPU 输出必须完全一致，否则启动失败。
 

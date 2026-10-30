@@ -23,5 +23,35 @@ class VideoTests(unittest.TestCase):
                     validate_container(path, 64, 64, 56, not enabled)
 
     def test_black_video_rejected(self):
-        with self.assertRaisesRegex(ValueError, 'video frames'):
-            export_video(np.zeros((56, 64, 64, 3)), torch.zeros(2, 100), 32000, Path('unused'), 64, 64, 56, True)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'invalid.mp4'
+            with self.assertRaisesRegex(ValueError, 'video frames'):
+                export_video(np.zeros((56, 64, 64, 3)), torch.zeros(2, round(56 / 24 * 32000)),
+                             32000, path, 64, 64, 56, False)
+            self.assertFalse(path.exists())
+
+    def test_invalid_late_frame_removes_partial_container(self):
+        frames = np.full((56, 64, 64, 3), 0.4, dtype=np.float32)
+        frames[-1, 0, 0, 0] = np.nan
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'invalid.mp4'
+            with self.assertRaisesRegex(ValueError, 'video frames'):
+                export_video(frames, torch.zeros(2, round(56 / 24 * 32000)),
+                             32000, path, 64, 64, 56, False)
+            self.assertFalse(path.exists())
+
+    def test_framewise_float_and_uint8_conversion_preserve_rgb_and_frame_count(self):
+        import av
+        pixels = np.zeros((56, 64, 64, 3), dtype=np.uint8)
+        pixels[:] = [192, 96, 32]
+        with tempfile.TemporaryDirectory() as temp:
+            for frames in (pixels, pixels.astype(np.float32) / 255):
+                path = Path(temp) / 'colors.mp4'
+                timing = export_video(frames, torch.zeros(2, round(56 / 24 * 32000)),
+                                      32000, path, 64, 64, 56, False)
+                self.assertIn('container_validation_s', timing)
+                with av.open(str(path)) as container:
+                    decoded = list(container.decode(video=0))
+                self.assertEqual(len(decoded), 56)
+                np.testing.assert_allclose(decoded[0].to_ndarray(format='rgb24').mean(axis=(0, 1)),
+                                           [192, 96, 32], atol=4)

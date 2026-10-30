@@ -88,3 +88,23 @@ benchmark 提供 `--resident --runs 2` 与 server 相同生命周期的验收入
 benchmark 每轮记录 generation_wall_s 并即时打印全阶段指标，下一轮独立开始阶段计时；重复运行的临时 embedding 文件同样清理。验收需同时观察第二轮 condition.previous_model_release_s，不能将延迟的生成器释放从吞吐时间中漏掉。
 
 本次本地完整回归 83 项通过；compileall 和 git diff --check 通过。测试环境为本机 CPU，完整 H3 GPU 复测尚未执行。
+
+## 两轮实际 H3 复测与导出修订
+
+用户提供 /workspace/h3-perf-20261030-062038 的完整日志：启动 434.5 秒；768×1344 / 124 帧 / 4 步 / seed42 两轮均成功，总生成耗时 244.705、318.430 秒。编码器释放分别 0.602、0.638 秒，第二轮释放上一轮生成器 1.194 秒，证明权重回拷优化已在完整流程生效。未据此宣称两轮画面数值相同。
+
+剩余耗时：编码器上卡 36.939、87.521 秒；生成器上卡 8.502、77.015 秒；去噪 56.914、56.850 秒；视频解码 22.906、18.586 秒；音频解码 0.407、0.128 秒；validate_export 115.257、74.983 秒。第二轮没有持续变快，不能将其称为达到常驻性能目标。
+
+核对 pinned Diffusers encode_video：numpy 路径使用整段 zeros_like、ones_like、布尔范围掩码以及乘法/round/astype，反复分配全视频数组；PyAV 的 x264 线程未限制。该实现路径确实存在，但原日志尚不能将 75–115 秒全部归因到某个具体子操作。
+
+本地改为逐帧校验/量化，维持浮点输入 [0,1] 到 RGB uint8 的四舍五入语义，明确 libx264 medium / CRF23 并限制线程；音频仍 AAC 立体声。导出指标拆分 frame_prepare_s、video_encode_s、audio_encode_s、encode_mux_s、container_validation_s，逐秒段帧数进度写入日志；失败删除残缺视频。真实容器测试覆盖音轨、帧数、帧率、RGB 解码颜色、float/uint8 输入、尾帧 NaN 和黑片拒绝。
+
+上卡路径补充同一进程 major/minor faults、实际 read_bytes、读取系统调用数、用户/内核 CPU 时间的前后差值。缺页和读盘信息用于判断文件映射权重重读；没有证据时不将波动武断归于 PCIe 或 NUMA，也不增加每单完整权重扫描。
+
+本地完整回归 85 项通过。768×1344 / 124 帧静态渐变合成素材导出测试 0.613 秒；这是本机低复杂度素材的导出测试，不是 Vast 或真实生成画面的性能承诺。真实 GPU 新版导出耗时、模型上卡波动尚待验收。
+
+## 双模型 INT8WO 实验分支
+
+增加 `dual_int8` 生命周期，使用 TorchAO 0.17.0 / Int8WeightOnlyConfig(group_size=128, version=2)。量化发生在 Eros beta5 转换之后，因此不读取不兼容的 ComfyUI ConvRot checkpoint。两套量化模型只上卡一次，phase 在 already_on_gpu 时完全跳过 pipeline.to。配置默认保留 8 GiB 运行期显存，否则启动失败；无 BF16 fallback。
+
+生成器 blocks 0、1、48、49 保持 BF16，conditioner lm_head、VAE/audio VAE 不量化。单元测试覆盖筛选策略、双模型各量化/放置一次、连续两阶段不释放且执行时标记 already_on_gpu。本分支完整本地回归 89 项通过，compileall 和 diff check 通过。真实 RTX PRO 6000 上的静态显存、TorchAO kernel 性能、完整成片质量仍需本分支首次实测。

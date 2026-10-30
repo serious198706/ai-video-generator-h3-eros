@@ -34,7 +34,7 @@ def check_host():
     return {'driver_versions': versions}
 
 
-def check_runtime(attention='_native_cudnn'):
+def check_runtime(attention='_native_cudnn', model_lifetime='resident'):
     report = check_host()
     from h3_service.infer.cpu_budget import configure_environment, configure_torch
     configure_environment()
@@ -58,6 +58,19 @@ def check_runtime(attention='_native_cudnn'):
             if not torch.isfinite(output).all().item():
                 raise RuntimeError('cuDNN attention produced non-finite output')
         torch.cuda.synchronize()
+    if model_lifetime == 'dual_int8':
+        from importlib.metadata import version
+        from torchao.quantization import Int8WeightOnlyConfig, quantize_
+        probe = torch.nn.Linear(256, 256, bias=False, dtype=torch.bfloat16)
+        quantize_(probe, Int8WeightOnlyConfig(group_size=128, version=2))
+        probe.to('cuda')
+        with torch.inference_mode():
+            quantized_output = probe(torch.ones(1, 256, device='cuda', dtype=torch.bfloat16))
+        if quantized_output.shape != (1, 256) or not torch.isfinite(quantized_output).all().item():
+            raise RuntimeError('TorchAO INT8WO CUDA smoke test failed')
+        del probe, quantized_output
+        torch.cuda.empty_cache()
+        report.update(torchao=version('torchao'), int8wo_smoke_test='passed')
     report.update(torch=torch.__version__, torchvision=torchvision.__version__, cuda_runtime=torch.version.cuda,
                   cudnn=torch.backends.cudnn.version(), device=props.name,
                   compute_capability=list(torch.cuda.get_device_capability(0)),
@@ -75,7 +88,8 @@ def main():
             report = check_host()
         else:
             from h3_service.config import Settings
-            report = check_runtime(Settings().attention)
+            settings = Settings()
+            report = check_runtime(settings.attention, settings.model_lifetime)
         print(json.dumps(report, indent=2))
         return 0
     except Exception as exc:

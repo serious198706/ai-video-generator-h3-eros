@@ -1,6 +1,7 @@
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from h3_service.config import Settings
@@ -48,6 +49,44 @@ class ResidentTests(unittest.TestCase):
             self.assertIs(execute.call_args_list[2].kwargs['loaded_pipe'], pipes[0])
             for pipe in pipes:
                 self.assertEqual([c.args[0] for c in pipe.to.call_args_list], ['cuda'])
+
+    def test_dual_int8_quantizes_and_places_both_models_once(self):
+        import torch
+        pipes = [MagicMock(), MagicMock()]
+        pipes[0].text_encoder = torch.nn.Linear(2, 2, bias=False)
+        pipes[1].transformer = MagicMock()
+        blocks = MagicMock()
+        blocks.load_pipeline.side_effect = pipes
+        eros = MagicMock()
+        eros.apply_eros.return_value = {'replaced': 634}
+        quantized = {'conditioner': {'scheme': 'int8wo'}, 'generator': {'scheme': 'int8wo'}}
+
+        def place(pipe, emit):
+            pipe.to('cuda')
+            return {'wall_s': 1.0}
+
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.dict('sys.modules', {'h3_service.infer.blocks': blocks, 'h3_service.infer.eros': eros,
+                                            'torchao': SimpleNamespace(__version__='0.17.0')}), \
+                patch('h3_service.infer.resident.available_memory', return_value=220 * 1024**3), \
+                patch('torch.cuda.mem_get_info', return_value=(12 * 1024**3, 95 * 1024**3)), \
+                patch('torch.cuda.memory_allocated', return_value=78 * 1024**3), \
+                patch('torch.cuda.memory_reserved', return_value=80 * 1024**3), \
+                patch('h3_service.infer.transfer.place_on_gpu', side_effect=place), \
+                patch('h3_service.infer.quantization.quantize_int8wo',
+                      side_effect=lambda module, component, emit: quantized[component]) as quantize, \
+                patch('h3_service.infer.phase.execute', return_value={'load_s': 0}) as execute:
+            settings = Settings(converted_cache=False, model_lifetime='dual_int8', dual_min_free_gib=8)
+            models = ResidentModels(settings, lambda message: None)
+            for mode in ('condition', 'generate'):
+                result = models.run(mode, {'directory': temp})
+                self.assertEqual(result['quantization'], 'dual_int8wo')
+                self.assertEqual(result['offload_s'], 0.0)
+            self.assertEqual(quantize.call_count, 2)
+            self.assertEqual(execute.call_count, 2)
+            self.assertTrue(all(call.kwargs['already_on_gpu'] for call in execute.call_args_list))
+            for pipe in pipes:
+                self.assertEqual([call.args[0] for call in pipe.to.call_args_list], ['cuda'])
 
     def test_insufficient_container_memory_fails_before_loading(self):
         blocks = MagicMock()

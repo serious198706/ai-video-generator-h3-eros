@@ -48,10 +48,16 @@ class ResidentModels:
         self.cpu_weights = {}
         self.active_mode = None
         self.last_release = {}
+        self.dual_int8 = settings.model_lifetime == 'dual_int8'
+        self.quantization = {}
         # Initial budget is deliberately conservative and configurable; no silent cold fallback.
         self.check_memory(settings.resident_min_ram_gib)
-        emit('validating CPU parameter restore on CUDA before loading large models')
-        emit('CPU parameter restore CUDA check: ' + validate_cuda())
+        if self.dual_int8:
+            from importlib.metadata import version
+            emit(f'experimental dual INT8WO mode; torchao={version("torchao")}')
+        else:
+            emit('validating CPU parameter restore on CUDA before loading large models')
+            emit('CPU parameter restore CUDA check: ' + validate_cuda())
         for mode, conditioner in [('condition', True), ('generate', False)]:
             emit(f'loading resident {mode} into CPU memory')
             if conditioner:
@@ -60,16 +66,40 @@ class ResidentModels:
                 pipe, self.conversion = load_generator(settings, emit, load_pipeline, apply_eros)
                 pipe.transformer.set_attention_backend(settings.attention)
             self.pipes[mode] = pipe
-            self.cpu_weights[mode] = CpuWeights(pipe)
-            emit(f'CPU parameter storage retained mode={mode} GiB={self.cpu_weights[mode].bytes / 1024**3:.2f}')
+            if self.dual_int8:
+                from h3_service.infer.quantization import quantize_int8wo
+                module = pipe.text_encoder if conditioner else pipe.transformer
+                component = 'conditioner' if conditioner else 'generator'
+                self.quantization[mode] = quantize_int8wo(module, component, emit)
+            else:
+                self.cpu_weights[mode] = CpuWeights(pipe)
+                emit(f'CPU parameter storage retained mode={mode} GiB={self.cpu_weights[mode].bytes / 1024**3:.2f}')
             self.check_memory(16)
-            emit(f'probing resident {mode} GPU placement')
-            if torch.cuda.mem_get_info()[0] / 1024**3 < settings.min_free_gib:
-                raise RuntimeError('insufficient free GPU memory')
-            pipe.to('cuda')
-            torch.cuda.synchronize()
-            self.offload(pipe, mode)
-        emit('resident models ready on CPU; Eros conversion completed once')
+            if not self.dual_int8:
+                emit(f'probing resident {mode} GPU placement')
+                if torch.cuda.mem_get_info()[0] / 1024**3 < settings.min_free_gib:
+                    raise RuntimeError('insufficient free GPU memory')
+                from h3_service.infer.transfer import place_on_gpu
+                place_on_gpu(pipe, emit)
+                self.offload(pipe, mode)
+        if self.dual_int8:
+            from h3_service.infer.transfer import place_on_gpu
+            for mode in ('condition', 'generate'):
+                emit(f'placing quantized {mode} permanently on GPU')
+                place_on_gpu(self.pipes[mode], emit)
+                free, total = torch.cuda.mem_get_info()
+                emit(f'dual INT8WO placement mode={mode} allocated_gib={torch.cuda.memory_allocated() / 1024**3:.2f} '
+                     f'reserved_gib={torch.cuda.memory_reserved() / 1024**3:.2f} free_gib={free / 1024**3:.2f} '
+                     f'total_gib={total / 1024**3:.2f}')
+            free, _ = torch.cuda.mem_get_info()
+            if free / 1024**3 < settings.dual_min_free_gib:
+                emit(f'dual INT8WO rejected: free_gib={free / 1024**3:.2f} '
+                     f'required_runtime_headroom_gib={settings.dual_min_free_gib:.2f}')
+                raise RuntimeError('dual INT8WO models fit but leave insufficient runtime VRAM headroom')
+            self.active_mode = 'dual_int8'
+            emit('dual INT8WO models ready on GPU; no per-task model placement')
+        else:
+            emit('resident models ready on CPU; Eros conversion completed once')
 
     def check_memory(self, required):
         free = available_memory() / 1024**3
@@ -98,6 +128,17 @@ class ResidentModels:
     def run(self, mode, job):
         from h3_service.infer.phase import execute
         self.check_memory(16)
+        if self.dual_int8:
+            pipe = self.pipes[mode]
+            if mode == 'generate':
+                atomic(Path(job['directory']) / 'conversion.json', self.conversion)
+                atomic(Path(job['directory']) / 'quantization.json', self.quantization)
+            result = execute(mode, job, self.settings, progress=self.emit, loaded_pipe=pipe,
+                             already_on_gpu=True)
+            result.update(offload_s=0.0, previous_model_release_s=0.0, release={},
+                          previous_model_release={}, gpu_retained=True, resident=True,
+                          quantization='dual_int8wo')
+            return result
         eviction_s = 0.0
         eviction_details = {}
         if self.active_mode is not None and self.active_mode != mode:
@@ -214,7 +255,9 @@ class ResidentEngine(Engine):
                        'H3_EROS_FILE': str(self.settings.eros_file.resolve()),
                        'H3_ATTENTION': self.settings.attention,
                        'H3_MIN_FREE_GIB': str(self.settings.min_free_gib),
-                       'H3_RESIDENT_MIN_RAM_GIB': str(self.settings.resident_min_ram_gib)}
+                       'H3_RESIDENT_MIN_RAM_GIB': str(self.settings.resident_min_ram_gib),
+                       'H3_MODEL_LIFETIME': self.settings.model_lifetime,
+                       'H3_DUAL_MIN_FREE_GIB': str(self.settings.dual_min_free_gib)}
         environment.update(H3_TRANSFORMER_CACHE=str(self.settings.transformer_cache.resolve()),
                            H3_CONVERTED_CACHE='1' if self.settings.converted_cache else '0',
                            H3_VERIFY_MODE=self.settings.verify_mode)

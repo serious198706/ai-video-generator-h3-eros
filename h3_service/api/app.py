@@ -19,7 +19,7 @@ async def lifespan(app):
     with (settings.work_dir / 'worker.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         s3, sqs = clients(settings)
-        engine_class = ResidentEngine if settings.model_lifetime == 'resident' else Engine
+        engine_class = ResidentEngine if settings.model_lifetime in {'resident', 'dual_int8'} else Engine
         worker = Worker(settings, Store(settings, s3), sqs, engine_class(settings))
         app.state.worker = worker
         worker.start()

@@ -4,6 +4,7 @@
 # Linux CUDA wheels explicitly pinned: an installed cu128 build must not satisfy these.
 torch==2.11.0+cu130
 torchvision==0.26.0+cu130
+torchao==0.17.0
 diffusers @ git+https://github.com/huggingface/diffusers.git@665f578278365ea4a3318cb8c9b66ce6c01204b9
 transformers==5.8.0
 accelerate==1.14.0

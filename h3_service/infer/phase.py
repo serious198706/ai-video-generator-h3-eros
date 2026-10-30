@@ -24,7 +24,7 @@ def execute(mode, job, settings, progress=None, loaded_pipe=None, already_on_gpu
     if mode == 'probe-runtime':
         from h3_service.check_runtime import check_runtime
         emit('checking driver, CUDA BF16 and cuDNN kernels')
-        return check_runtime(settings.attention)
+        return check_runtime(settings.attention, settings.model_lifetime)
     import torch
     emit(f'CPU intra-op thread budget: {configure_torch()}')
     from safetensors.torch import save_file
@@ -55,10 +55,13 @@ def execute(mode, job, settings, progress=None, loaded_pipe=None, already_on_gpu
             Path(job['directory'], 'conversion.json').write_text(json.dumps(report))
         pipe.transformer.set_attention_backend(settings.attention)
     emit('moving loaded model to GPU')
-    transfer_started = time.monotonic()
-    pipe.to('cuda')
-    torch.cuda.synchronize()
-    stages['transfer_to_gpu_s'] = time.monotonic() - transfer_started
+    from h3_service.infer.transfer import place_on_gpu
+    if already_on_gpu:
+        emit('model already resident on GPU; placement skipped')
+        stages['gpu_transfer'] = {'wall_s': 0.0, 'skipped': True}
+    else:
+        stages['gpu_transfer'] = place_on_gpu(pipe, emit)
+    stages['transfer_to_gpu_s'] = stages['gpu_transfer']['wall_s']
     loaded = time.monotonic() - started
     if mode.startswith('probe-'):
         return {'load_s': loaded, 'total_gib': total / 1024**3}
@@ -97,8 +100,9 @@ def execute(mode, job, settings, progress=None, loaded_pipe=None, already_on_gpu
                              generator=torch.Generator('cpu').manual_seed(job['seed']), **common)
             emit('validating frames/audio and encoding MP4')
             export_started = time.monotonic()
-            export_video(state.get('videos')[0], state.get('audio')[0].cpu(), state.get('sampling_rate'),
-                         directory / 'output.mp4', width, height, num_frames, job['audio'])
+            stages['export'] = export_video(
+                state.get('videos')[0], state.get('audio')[0].cpu(), state.get('sampling_rate'),
+                directory / 'output.mp4', width, height, num_frames, job['audio'], progress=emit)
             stages['validate_export_s'] = time.monotonic() - export_started
     torch.cuda.synchronize()
     return {'load_s': loaded if loaded_pipe is None else 0.0, 'transfer_s': loaded if loaded_pipe is not None else 0.0, 'compute_export_s': time.monotonic() - started,
