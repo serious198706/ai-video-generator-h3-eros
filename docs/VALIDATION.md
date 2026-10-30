@@ -107,4 +107,4 @@ benchmark 每轮记录 generation_wall_s 并即时打印全阶段指标，下一
 
 增加 `dual_int8` 生命周期，使用 TorchAO 0.17.0 / Int8WeightOnlyConfig(group_size=128, version=2)。量化发生在 Eros beta5 转换之后，因此不读取不兼容的 ComfyUI ConvRot checkpoint。两套量化模型只上卡一次，phase 在 already_on_gpu 时完全跳过 pipeline.to。配置默认保留 8 GiB 运行期显存，否则启动失败；无 BF16 fallback。
 
-生成器 blocks 0、1、48、49 保持 BF16，conditioner lm_head、VAE/audio VAE 不量化。单元测试覆盖筛选策略、双模型各量化/放置一次、连续两阶段不释放且执行时标记 already_on_gpu。本分支完整本地回归 89 项通过，compileall 和 diff check 通过。真实 RTX PRO 6000 上的静态显存、TorchAO kernel 性能、完整成片质量仍需本分支首次实测。
+生成器 blocks 0、1、48、49 保持 BF16，conditioner lm_head、VAE/audio VAE 不量化。单元测试覆盖筛选策略、双模型各量化/放置一次、连续两阶段不释放且执行时标记 already_on_gpu。首次 Vast runtime probe 暴露 TorchAO 0.17 v2 不接受 `group_size` 与 `version=2` 同时使用；已改为等价的 `granularity=PerGroup(128)`，并增加参数构造回归测试。本分支完整本地回归 90 项通过，compileall 和 diff check 通过。真实 RTX PRO 6000 上的静态显存、TorchAO kernel 性能、完整成片质量仍需本分支首次实测。

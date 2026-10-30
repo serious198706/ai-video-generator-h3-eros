@@ -60,9 +60,10 @@ def check_runtime(attention='_native_cudnn', model_lifetime='resident'):
         torch.cuda.synchronize()
     if model_lifetime == 'dual_int8':
         from importlib.metadata import version
-        from torchao.quantization import Int8WeightOnlyConfig, quantize_
+        from torchao.quantization import quantize_
+        from h3_service.infer.quantization import int8wo_config
         probe = torch.nn.Linear(256, 256, bias=False, dtype=torch.bfloat16)
-        quantize_(probe, Int8WeightOnlyConfig(group_size=128, version=2))
+        quantize_(probe, int8wo_config())
         probe.to('cuda')
         with torch.inference_mode():
             quantized_output = probe(torch.ones(1, 256, device='cuda', dtype=torch.bfloat16))

@@ -12,7 +12,7 @@
 
 ### 实验：单卡双模型 INT8WO 常驻
 
-分支 `experiment/dual-int8wo` 提供 TorchAO INT8 weight-only 实验模式。Qwen3-VL conditioner 的 Linear 层和 Eros generator 的绝大多数 Linear 层在 CPU 加载后量化，H3 transformer 的 blocks 0、1、48、49、conditioner 的 lm_head、两个 VAE 继续使用原精度。两套 pipeline 随后同时放入 GPU，任务阶段的 `gpu_transfer.wall_s` 应为 0 且带 `skipped=true`。
+分支 `experiment/dual-int8wo` 提供 TorchAO INT8 weight-only 实验模式。Qwen3-VL conditioner 的 Linear 层和 Eros generator 的绝大多数 Linear 层在 CPU 加载后量化，H3 transformer 的 blocks 0、1、48、49、conditioner 的 lm_head、两个 VAE 继续使用原精度。TorchAO 0.17 v2 使用 `granularity=PerGroup(128)`；不能同时传旧版 `group_size` 参数。两套 pipeline 随后同时放入 GPU，任务阶段的 `gpu_transfer.wall_s` 应为 0 且带 `skipped=true`。
 
 `.env` 设置：
 

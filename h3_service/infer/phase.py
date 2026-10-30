@@ -132,7 +132,10 @@ def main():
         # Never echo prompts, signed URLs or full exception messages into service logs.
         frames = [{'file': Path(f.filename).name, 'line': f.lineno, 'function': f.name}
                   for f in traceback.extract_tb(exc.__traceback__)]
-        args.report.write_text(json.dumps({'error': type(exc).__name__, 'trace': frames}))
+        failure = {'error': type(exc).__name__, 'trace': frames}
+        if args.mode == 'probe-runtime':
+            failure['detail'] = str(exc)[:500]
+        args.report.write_text(json.dumps(failure))
         print(f'H3 {args.mode} failed: {type(exc).__name__}', file=sys.stderr)
         return 1
 

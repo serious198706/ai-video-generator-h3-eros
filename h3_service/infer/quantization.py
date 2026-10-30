@@ -8,6 +8,12 @@ GENERATOR_BF16_PREFIXES = (
 )
 
 
+def int8wo_config():
+    """TorchAO 0.17 v2 expresses group size through granularity, not group_size."""
+    from torchao.quantization import Int8WeightOnlyConfig, PerGroup
+    return Int8WeightOnlyConfig(granularity=PerGroup(128), version=2)
+
+
 def int8wo_filter(component, module, fqn):
     """Keep output/tied and H3 boundary layers in BF16; quantize other Linear weights."""
     import torch
@@ -23,14 +29,14 @@ def int8wo_filter(component, module, fqn):
 def quantize_int8wo(module, component, emit):
     """Quantize in CPU memory before either large model is placed on the GPU."""
     import torch
-    from torchao.quantization import Int8WeightOnlyConfig, quantize_
+    from torchao.quantization import quantize_
     targets = [fqn for fqn, child in module.named_modules()
                if int8wo_filter(component, child, fqn)]
     if not targets:
         raise RuntimeError(f'no INT8WO targets found for {component}')
     emit(f'INT8WO quantization start component={component} linear_targets={len(targets)}')
     started = time.monotonic()
-    quantize_(module, Int8WeightOnlyConfig(group_size=128, version=2),
+    quantize_(module, int8wo_config(),
               filter_fn=lambda child, fqn: int8wo_filter(component, child, fqn))
     elapsed = time.monotonic() - started
     # TorchAO weights retain their logical BF16 dtype; verify their tensor subclass changed.
