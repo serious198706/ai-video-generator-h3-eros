@@ -13,9 +13,11 @@ def read_image(path):
 
 def prepare(first, last, resolution, directory):
     image = read_image(first)
-    width, height = (960, 544) if resolution == '540p' else (1344, 768)
+    width, height = (960, 544) if resolution in {'480p', '540p'} else (1344, 768)
     if image.height > image.width:
         width, height = height, width
+    if image.width == image.height:
+        width = height = 544 if resolution in {'480p', '540p'} else 768
     paths = []
     for name, source in [('first', image), ('last', read_image(last) if last else None)]:
         path = directory / f'{name}.png' if source else None

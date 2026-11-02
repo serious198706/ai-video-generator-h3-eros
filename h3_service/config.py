@@ -18,6 +18,8 @@ class Settings:
     status_prefix: str = field(default_factory=lambda: env('H3_STATUS_PREFIX', 'WAN22_STATUS_PREFIX', 'STATUS_PREFIX', 'WAN22_S3_PREFIX', default='video/wan22/'))
     public_base: str = field(default_factory=lambda: env('H3_PUBLIC_BASE_URL', 'WAN22_S3_PUBLIC_BASE_URL'))
     queue_url: str = field(default_factory=lambda: env('H3_QUEUE_URL', 'SQS_QUEUE_URL'))
+    upscale_queue_url: str = field(default_factory=lambda: env('H3_UPSCALE_QUEUE_URL'))
+    staging_prefix: str = field(default_factory=lambda: env('H3_STAGING_PREFIX', default='video/wan22/staging/'))
     endpoint: str = field(default_factory=lambda: env('H3_AWS_ENDPOINT', 'WAN22_S3_ENDPOINT', 'S3_ENDPOINT'))
     sqs_endpoint: str = field(default_factory=lambda: env('H3_AWS_ENDPOINT', 'SQS_ENDPOINT'))
     image_hosts: tuple = field(default_factory=lambda: tuple(filter(None, env('H3_IMAGE_HOSTS', 'WAN22_IMAGE_HOSTS').split(','))))
@@ -42,6 +44,10 @@ class Settings:
     converted_cache: bool = field(default_factory=lambda: os.getenv('H3_CONVERTED_CACHE', '1') == '1')
 
     def validate_cloud(self):
+        if self.upscale_queue_url and self.upscale_queue_url == self.queue_url:
+            raise ValueError('generation and upscale queues must be different')
+        if not self.staging_prefix.strip('/'):
+            raise ValueError('H3_STAGING_PREFIX must be nonempty')
         if self.model_lifetime not in {'resident', 'cold', 'dual_int8'}:
             raise ValueError('H3_MODEL_LIFETIME must be resident, dual_int8 or cold')
         if self.dual_min_free_gib < 0:

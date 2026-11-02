@@ -21,13 +21,21 @@ class GenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=12000)
     last_image: str | None = Field(default=None, alias='lastImage', max_length=8192)
     webhook_url: str | None = Field(default=None, alias='webhookUrl', max_length=8192)
-    duration: float = Field(default=5, ge=2, le=14)
-    resolution: Literal['540p', '720p'] = '540p'
+    duration: float = Field(default=5, ge=2, le=15)
+    resolution: Literal['480p', '540p', '720p', '1080p'] = '540p'
     steps: int = Field(default=6, ge=4, le=8, strict=True)
     seed: int | None = Field(default=None, ge=0, le=2**63-1, strict=True)
     audio: bool = False
     negative_prompt: str | None = Field(default=None, alias='negativePrompt')
     quality: None = None
+
+    @property
+    def generation_duration(self):
+        return min(self.duration, 14.0)
+
+    @property
+    def generation_resolution(self):
+        return {'480p': '540p', '1080p': '720p'}.get(self.resolution, self.resolution)
 
     @field_validator('image', 'prompt', 'last_image', 'webhook_url', mode='before')
     @classmethod

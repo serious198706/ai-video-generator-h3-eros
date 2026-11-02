@@ -25,6 +25,8 @@ def verify_queue(settings, sqs=None):
         sqs = boto3.Session(region_name=settings.region).client('sqs', config=Config(
             connect_timeout=5, read_timeout=10, retries={'total_max_attempts': 2, 'mode': 'standard'}))
     sqs.get_queue_attributes(QueueUrl=settings.queue_url, AttributeNames=['QueueArn'])
+    if settings.upscale_queue_url:
+        sqs.get_queue_attributes(QueueUrl=settings.upscale_queue_url, AttributeNames=['QueueArn'])
 
 
 def save_credentials(path, region):

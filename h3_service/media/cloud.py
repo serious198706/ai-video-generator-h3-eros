@@ -51,19 +51,23 @@ class Store:
                            Body=json.dumps(state, ensure_ascii=False, allow_nan=False).encode(),
                            ContentType='application/json', CacheControl='no-store')
 
-    def upload(self, ident, path, result, fingerprint):
+    def native_key(self, ident):
+        task_id(ident)
+        return self.settings.staging_prefix.strip('/') + '/' + ident + '/native.mp4'
+
+    def upload(self, ident, path, result, fingerprint, *, native=False):
         # Metadata committed atomically with the MP4 enables recovery after status-write failure.
         metadata = {'h3-result': json.dumps(result, separators=(',', ':'), allow_nan=False),
                     'task-id': ident, 'fingerprint': fingerprint}
         if sum(len(k) + len(v.encode()) for k, v in metadata.items()) > 1900:
             raise ValueError('result metadata too large')
-        self.s3.upload_file(str(path), self.settings.bucket, self.key(ident, True),
+        self.s3.upload_file(str(path), self.settings.bucket, self.native_key(ident) if native else self.key(ident, True),
                             ExtraArgs={'ContentType': 'video/mp4', 'Metadata': metadata})
 
-    def recover(self, ident, fingerprint):
+    def recover(self, ident, fingerprint, *, native=False):
         # GET has a typed NoSuchKey error, unlike HEAD's generic 404.
         try:
-            response = resource_call(self.s3, 'get_object', Bucket=self.settings.bucket, Key=self.key(ident, True), Range='bytes=0-0')
+            response = resource_call(self.s3, 'get_object', Bucket=self.settings.bucket, Key=self.native_key(ident) if native else self.key(ident, True), Range='bytes=0-0')
         except self.s3.exceptions.NoSuchKey:
             return None
         response['Body'].close()

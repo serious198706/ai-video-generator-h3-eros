@@ -79,9 +79,9 @@ def main():
         log(f'Preflight passed in {report["preflight_s"]:.1f}s')
 
         log('Preparing input image(s)')
-        first, last, width, height = prepare(image, last_image, request.resolution, output)
+        first, last, width, height = prepare(image, last_image, request.generation_resolution, output)
         job = {'prompt': request.prompt, 'first': str(first), 'last': str(last) if last else None,
-               'width': width, 'height': height, 'num_frames': frame_count(request.duration),
+               'width': width, 'height': height, 'num_frames': frame_count(request.generation_duration),
                'steps': request.steps, 'seed': request.seed, 'audio': request.audio}
         report['resolved'] = {k: v for k, v in job.items() if k not in {'prompt', 'first', 'last'}}
         log(f'Resolved: canvas={width}x{height}, frames={job["num_frames"]}, fps=24, '

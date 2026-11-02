@@ -90,13 +90,13 @@ class ProgressTests(unittest.TestCase):
             stderr = io.StringIO()
             with patch('sys.argv', ['benchmark.py', '--image', str(root / 'image.png'),
                                    '--prompt-file', str(prompt), '--output', str(output),
-                                   '--resolution', '1080p', '--duration', '15']), \
+                                   '--resolution', '2160p', '--duration', '16']), \
                     patch('sys.stderr', stderr):
                 self.assertEqual(benchmark.main(), 2)
             self.assertFalse(output.exists())
             message = stderr.getvalue()
             self.assertIn('Request validation failed', message)
             self.assertIn('duration', message)
-            self.assertIn('less than or equal to 14', message)
+            self.assertIn('less than or equal to 15', message)
             self.assertIn('resolution', message)
-            self.assertIn("540p' or '720p", message)
+            self.assertIn('720p', message)

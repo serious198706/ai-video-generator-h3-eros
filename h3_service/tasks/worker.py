@@ -143,6 +143,8 @@ class Worker:
                       json.dumps(validation_summary(exc)))
             raise
         ident, request = envelope.task_id, envelope.request
+        if request.resolution == '1080p' and not self.settings.upscale_queue_url:
+            raise ValueError('H3_UPSCALE_QUEUE_URL is required for 1080p tasks')
         trace.accept(ident, request, message.get('Attributes', {}).get('ApproximateReceiveCount', '1'))
         LOG.info('task accepted task=%s resolution=%s duration=%s steps=%s audio=%s callback_requested=%s',
                  ident, request.resolution, request.duration, request.steps, request.audio, bool(request.webhook_url))
@@ -193,7 +195,7 @@ class Worker:
                     LOG.info('SQS visibility renewed task=%s timeout_s=%s stage=%s',
                              ident, self.settings.visibility, self.stage)
                     with lock:
-                        if state['status'] not in TERMINAL:
+                        if state['status'] not in TERMINAL and not state.get('upscale_handoff'):
                             self.store.write(state)
                 except Exception as exc:
                     LOG.error('heartbeat failed task=%s type=%s', ident, type(exc).__name__)
@@ -206,6 +208,13 @@ class Worker:
         heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
         heartbeat_thread.start()
         try:
+            if request.resolution == '1080p' and state.get('upscale_handoff'):
+                # Ownership already passed to the upscaler. Never overwrite its newer status.
+                self.submit_upscale(state)
+                self.sqs.delete_message(QueueUrl=self.settings.queue_url, ReceiptHandle=receipt)
+                trace.deleted = True
+                self.deleted_messages += 1
+                return
             if state['status'] not in TERMINAL:
                 # A newly queued task has no video yet. Only inspect video metadata after a
                 # persisted upload attempt, avoiding a guaranteed missing-object GET per task.
@@ -215,10 +224,14 @@ class Worker:
                 if recover_upload:
                     LOG.info('upload recovery check start task=%s', ident)
                 with trace.measure('upload_recovery'):
-                    result = self.store.recover(ident, stamp) if recover_upload else None
+                    result = (self.store.recover(ident, stamp, native=True) if request.resolution == '1080p'
+                              else self.store.recover(ident, stamp)) if recover_upload else None
                 if result is not None:
                     LOG.info('upload recovery found existing video task=%s; generation skipped', ident)
-                    persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
+                    if request.resolution == '1080p':
+                        self.handoff_upscale(state, result, persist)
+                    else:
+                        persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
                 elif int(message.get('Attributes', {}).get('ApproximateReceiveCount', '1')) >= self.settings.max_receive:
                     LOG.warning('task receive limit reached task=%s limit=%s; marking failed without generation', ident, self.settings.max_receive)
                     persist(status='failed', error='poisoned', stage='complete')
@@ -228,6 +241,12 @@ class Worker:
                 LOG.info('terminal task redelivered task=%s status=%s; generation skipped', ident, state['status'])
             trace.status, trace.error = state['status'], state.get('error')
             self.check()
+            if state.get('upscale_handoff'):
+                self.sqs.delete_message(QueueUrl=self.settings.queue_url, ReceiptHandle=receipt)
+                trace.deleted = True
+                self.deleted_messages += 1
+                LOG.info('upscale handoff complete task=%s; generation message deleted', ident)
+                return
             if state.get('callback') not in {'delivered', 'not_requested', 'exhausted'}:
                 LOG.info('callback processing start task=%s', ident)
                 with trace.measure('callback'):
@@ -288,7 +307,7 @@ class Worker:
                                     raise
                                 self.cancelled.wait(2**attempt)
                 with trace.measure('image_prepare'):
-                    first, last, width, height = prepare(first, last, request.resolution, directory)
+                    first, last, width, height = prepare(first, last, request.generation_resolution, directory)
                 LOG.info('images prepared task=%s width=%s height=%s last_frame=%s', ident, width, height, bool(last))
             except LeaseLost:
                 raise
@@ -297,11 +316,18 @@ class Worker:
                 trace.failed_stage = trace.failed_stage or 'download_or_prepare'
                 persist(status='failed', stage='complete', error='download_failed')
                 return
-            frames = frame_count(request.duration)
+            frames = frame_count(request.generation_duration)
+            LOG.info('generation parameters resolved task=%s requested_duration=%s generation_duration=%s '
+                     'requested_resolution=%s generation_resolution=%s frames=%s actual_duration=%.3f',
+                     ident, request.duration, request.generation_duration, request.resolution,
+                     request.generation_resolution, frames, frames / 24)
             job = {'prompt': request.prompt, 'first': str(first), 'last': str(last) if last else None,
                    'width': width, 'height': height, 'num_frames': frames,
                    'steps': request.steps, 'seed': state['seed'], 'audio': request.audio}
-            persist(resolved={k: v for k, v in job.items() if k not in {'prompt', 'first', 'last'}})
+            persist(resolved={**{k: v for k, v in job.items() if k not in {'prompt', 'first', 'last'}},
+                              'generation_duration': request.generation_duration,
+                              'generation_resolution': request.generation_resolution,
+                              'actual_duration': frames / 24})
             try:
                 LOG.info('generation start task=%s seed=%s frames=%s steps=%s', ident, state['seed'], frames, request.steps)
                 generation_started = time.monotonic()
@@ -326,6 +352,34 @@ class Worker:
             upload_started = time.monotonic()
             LOG.info('S3 video upload start task=%s', ident)
             with trace.measure('upload'):
-                self.store.upload(ident, output, result, stamp)
+                if request.resolution == '1080p':
+                    self.store.upload(ident, output, result, stamp, native=True)
+                else:
+                    self.store.upload(ident, output, result, stamp)
             LOG.info('S3 video upload complete task=%s elapsed_s=%.3f', ident, time.monotonic() - upload_started)
-            persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
+            if request.resolution == '1080p':
+                self.handoff_upscale(state, result, persist)
+            else:
+                persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
+
+    def handoff_upscale(self, state, result, persist):
+        # Commit all generator-owned state before publishing. Heartbeat stops writing
+        # after this marker; the upscaler can immediately take status ownership.
+        width, height = result['width'], result['height']
+        target = (1080, 1080) if width == height else ((1920, 1080) if width > height else (1080, 1920))
+        body = {'schema_version': 1, 'task_id': state['task_id'], 'target_width': target[0],
+                'target_height': target[1], 'preserve_audio': True}
+        persist(status='generating', stage='upscale_queued', result=result, upscale_message=body,
+                native_video_key=self.store.native_key(state['task_id']),
+                upscale_handoff=True, callback='pending')
+        self.submit_upscale(state)
+
+    def submit_upscale(self, state):
+        self.check()
+        ident = state['task_id']
+        body = state['upscale_message']
+        started = time.monotonic()
+        LOG.info('upscale SQS send start task=%s target=%sx%s', ident, body['target_width'], body['target_height'])
+        response = self.sqs.send_message(QueueUrl=self.settings.upscale_queue_url, MessageBody=json.dumps(body))
+        LOG.info('upscale SQS send complete task=%s message_id=%s elapsed_s=%.3f',
+                 ident, (response or {}).get('MessageId'), time.monotonic() - started)

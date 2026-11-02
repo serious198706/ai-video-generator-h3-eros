@@ -118,7 +118,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(next(iter(self.store.states.values()))['status'], 'queued')
 
     def test_unsupported_does_not_enqueue(self):
-        response = self.client.post('/v1/generate', json={'image': 'https://example.com/i', 'prompt': 'forest', 'resolution': '1080p'})
+        response = self.client.post('/v1/generate', json={'image': 'https://example.com/i', 'prompt': 'forest', 'resolution': '2160p'})
         self.assertEqual(response.status_code, 422)
         self.assertFalse(self.queue.sent)
 

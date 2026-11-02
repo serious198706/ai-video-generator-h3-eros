@@ -137,9 +137,13 @@ S3 中 request 保留 Wan 原始消息；内部仅将其归一化后比对，阶
 }
 ```
 
-支持范围：2–14 秒请求、540p/720p 档、横竖 16:9/9:16、4–8 步。5 秒实际为 124 帧 / 24 fps；查询与回调给出实际尺寸和时长。GPU 未验收前，这些是代码接受范围，不是已认证能力清单。
+支持范围：2–15 秒请求、480p/540p/720p/1080p 档，横竖及正方形画布，4–8 步。前端九种组合全部接受。request 保留原参数；480p 映射为 H3 540p 画布，1080p 用 720p 生成后独立超分，15 秒按 14 秒生成。帧对齐后：5 秒为 124 帧（5.167 秒），10 秒为 243 帧（10.125 秒），15 秒为 345 帧（14.375 秒）。status.resolved 记录 generation_duration、generation_resolution 和 actual_duration。这些是代码接受范围，不代表所有组合已完成 GPU 验收。
 
-`negativePrompt` 非空、`quality` 非空、480p/1080p 和未知字段返回 422。`audio=false` 输出无音轨 MP4，但仍进行模型联合生成。图片仅 HTTPS，最大 25 MiB / 4000 万像素，最多 3 次重定向；每次连接解析并固定目标 IP，拒绝图片私网地址。回调只有明确配置 host 白名单才允许私网，始终拒绝链路本地和 loopback。
+`negativePrompt` 非空、`quality` 非空和未知字段返回 422。`audio=false` 输出无音轨 MP4，但仍进行模型联合生成。图片仅 HTTPS，最大 25 MiB / 4000 万像素；拒绝图片私网地址。回调只有明确配置 host 白名单才允许私网，始终拒绝链路本地和 loopback。
+
+1080p 交接配置：设置 `H3_UPSCALE_QUEUE_URL` 为独立超分队列，`H3_STAGING_PREFIX=video/wan22/staging/` 必须与超分机器 `UPSCALER_STAGING_PREFIX` 相同；两机 bucket、status prefix、video prefix 也须一致。H3 身份新增超分队列的 `sqs:SendMessage`、`sqs:GetQueueAttributes` 和 staging 对象的 `s3:PutObject/GetObject` 权限。
+
+1080p 任务以原生 720p 画布生成，上传 `{H3_STAGING_PREFIX}/{task_id}/native.mp4` 后，将 status 写为 `generating/upscale_queued`，再发送超分消息，成功后删除生成队列消息。最终成功状态及回调由超分 worker 写入。交接前上传失败会重试；上传成功但状态写入失败可通过 S3 metadata 恢复；队列发送或删除失败则重投同一超分消息，不重新生成，不再覆盖超分 worker 状态。重复超分消息由超分 worker 幂等处理。
 
 提交成功为 202/queued。503/enqueue_unconfirmed 会附带 task_id，表示提交结果不确定，应先查询或核对队列，不能盲目重复提交。查询状态不存在为 unknown，S3 故障为 503。
 

@@ -20,7 +20,10 @@ class MemoryStore:
         state['updated_at'] = now()
         self.states[state['task_id']] = copy.deepcopy(state)
 
-    def recover(self, ident, stamp):
+    def native_key(self, ident):
+        return 'video/wan22/staging/' + ident + '/native.mp4'
+
+    def recover(self, ident, stamp, *, native=False):
         if ident not in self.videos:
             return None
         result, fingerprint = self.videos[ident]
@@ -28,7 +31,7 @@ class MemoryStore:
             raise ValueError('conflict')
         return copy.deepcopy(result)
 
-    def upload(self, ident, path, result, stamp):
+    def upload(self, ident, path, result, stamp, *, native=False):
         self.videos[ident] = (copy.deepcopy(result), stamp)
 
     def video_url(self, ident):
