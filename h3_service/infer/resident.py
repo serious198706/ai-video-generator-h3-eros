@@ -48,7 +48,8 @@ class ResidentModels:
         self.cpu_weights = {}
         self.active_mode = None
         self.last_release = {}
-        self.dual_int8 = settings.model_lifetime == 'dual_int8'
+        self.encoder_offload = settings.model_lifetime == 'int8_encoder_offload'
+        self.dual_int8 = settings.model_lifetime in {'dual_int8', 'int8_encoder_offload'}
         self.quantization = {}
         # Initial budget is deliberately conservative and configurable; no silent cold fallback.
         self.check_memory(settings.resident_min_ram_gib)
@@ -84,7 +85,7 @@ class ResidentModels:
                 self.offload(pipe, mode)
         if self.dual_int8:
             from h3_service.infer.transfer import place_on_gpu
-            for mode in ('condition', 'generate'):
+            for mode in (('generate',) if self.encoder_offload else ('condition', 'generate')):
                 emit(f'placing quantized {mode} permanently on GPU')
                 place_on_gpu(self.pipes[mode], emit)
                 free, total = torch.cuda.mem_get_info()
@@ -96,8 +97,9 @@ class ResidentModels:
                 emit(f'dual INT8WO rejected: free_gib={free / 1024**3:.2f} '
                      f'required_runtime_headroom_gib={settings.dual_min_free_gib:.2f}')
                 raise RuntimeError('dual INT8WO models fit but leave insufficient runtime VRAM headroom')
-            self.active_mode = 'dual_int8'
-            emit('dual INT8WO models ready on GPU; no per-task model placement')
+            self.active_mode = settings.model_lifetime
+            emit('INT8WO generator ready on GPU; text encoder stays on CPU between tasks'
+                 if self.encoder_offload else 'dual INT8WO models ready on GPU; no per-task model placement')
         else:
             emit('resident models ready on CPU; Eros conversion completed once')
 
@@ -130,14 +132,42 @@ class ResidentModels:
         self.check_memory(16)
         if self.dual_int8:
             pipe = self.pipes[mode]
+            placement = None
+            if self.encoder_offload and mode == 'condition':
+                import torch
+                from h3_service.infer.transfer import place_on_gpu
+                self.emit('releasing previous task intermediates/cache before text encoder GPU placement')
+                gc.collect()
+                torch.cuda.empty_cache()
+                self.emit('moving quantized text encoder to GPU; generator remains resident')
+                placement = place_on_gpu(pipe, self.emit)
             if mode == 'generate':
                 atomic(Path(job['directory']) / 'conversion.json', self.conversion)
                 atomic(Path(job['directory']) / 'quantization.json', self.quantization)
             result = execute(mode, job, self.settings, progress=self.emit, loaded_pipe=pipe,
                              already_on_gpu=True)
-            result.update(offload_s=0.0, previous_model_release_s=0.0, release={},
-                          previous_model_release={}, gpu_retained=True, resident=True,
-                          quantization='dual_int8wo')
+            release = {}
+            offload_s = 0.0
+            if self.encoder_offload and mode == 'condition':
+                import torch
+                self.emit('offloading quantized text encoder to CPU; generator remains on GPU')
+                started = time.monotonic()
+                pipe.to('cpu')
+                torch.cuda.synchronize()
+                gc.collect()
+                torch.cuda.empty_cache()
+                offload_s = time.monotonic() - started
+                free, _ = torch.cuda.mem_get_info()
+                release = {'wall_s': offload_s, 'free_gib': free / 1024**3,
+                           'allocated_gib': torch.cuda.memory_allocated() / 1024**3,
+                           'reserved_gib': torch.cuda.memory_reserved() / 1024**3}
+                self.emit('text encoder offload complete timing=' + json.dumps(release))
+                result.setdefault('stages', {})['gpu_transfer'] = placement
+                result['stages']['transfer_to_gpu_s'] = placement['wall_s']
+                result['transfer_s'] = placement['wall_s']
+            result.update(offload_s=offload_s, previous_model_release_s=0.0, release=release,
+                          previous_model_release={}, gpu_retained=not (self.encoder_offload and mode == 'condition'),
+                          resident=True, quantization='dual_int8wo', lifecycle=self.settings.model_lifetime)
             return result
         eviction_s = 0.0
         eviction_details = {}
@@ -272,7 +302,8 @@ class ResidentEngine(Engine):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
             self.wait_reply(Path(self.ipc.name) / 'ready.json', cancelled)
             self.healthy = True
-            self.progress(f'Resident models ready on CPU; pid={self.process.pid}; subsequent jobs reuse loaded weights')
+            self.progress(f'Resident models ready; lifecycle={self.settings.model_lifetime}; '
+                          f'pid={self.process.pid}; subsequent jobs reuse loaded weights')
         except BaseException:
             self.close()
             raise

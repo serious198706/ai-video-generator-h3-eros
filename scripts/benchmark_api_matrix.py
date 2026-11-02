@@ -53,11 +53,16 @@ def main():
     parser.add_argument('--api-base', default=os.getenv('H3_TEST_API_BASE', ''),
                         help='existing Lambda URL, including any API Gateway stage; no /v1 suffix')
     parser.add_argument('--image-url', required=True, help='public HTTPS image, identical for all nine jobs')
-    parser.add_argument('--prompt-file', required=True, type=Path)
+    prompts = parser.add_mutually_exclusive_group(required=True)
+    prompts.add_argument('--prompt-file', type=Path)
+    prompts.add_argument('--prompt')
     parser.add_argument('--output', required=True, type=Path, help='report directory; reuse to resume')
     parser.add_argument('--steps', type=int, default=4, choices=range(4, 9))
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--audio', action='store_true')
+    parser.add_argument('--durations', nargs='+', type=int, choices=(5, 10, 15), default=[5, 10, 15])
+    parser.add_argument('--resolutions', nargs='+', choices=('480p', '720p', '1080p'),
+                        default=['480p', '720p', '1080p'])
     parser.add_argument('--poll-seconds', type=float, default=5)
     parser.add_argument('--task-timeout', type=float, default=3600)
     args = parser.parse_args()
@@ -65,7 +70,7 @@ def main():
         parser.error('--api-base and --image-url must use HTTPS')
     if args.poll_seconds <= 0 or args.task_timeout <= 0:
         parser.error('poll interval and task timeout must be positive')
-    prompt = args.prompt_file.read_text().strip()
+    prompt = (args.prompt if args.prompt is not None else args.prompt_file.read_text()).strip()
     if not prompt:
         parser.error('prompt file is empty')
     identity = hashlib.sha256(json.dumps(
@@ -82,7 +87,7 @@ def main():
         report = {'created_at': utc(), 'input_fingerprint': identity,
                   'steps': args.steps, 'seed': args.seed, 'audio': args.audio,
                   'cases': [{'duration': duration, 'resolution': resolution, 'status': 'not_submitted'}
-                            for duration in (5, 10, 15) for resolution in ('480p', '720p', '1080p')]}
+                            for duration in args.durations for resolution in args.resolutions]}
         save(report_path, report)
     session = requests.Session()
     # Optional API key comes from the environment and is never stored in reports.
@@ -90,7 +95,7 @@ def main():
         session.headers['x-api-key'] = os.environ['H3_TEST_API_KEY']
     try:
         for index, case in enumerate(report['cases'], 1):
-            label = f"[{index}/9] {case['duration']}s/{case['resolution']}"
+            label = f"[{index}/{len(report['cases'])}] {case['duration']}s/{case['resolution']}"
             if case['status'] in {'succeeded', 'failed'}:
                 print(f"{label} already {case['status']}; skipped", flush=True)
                 continue

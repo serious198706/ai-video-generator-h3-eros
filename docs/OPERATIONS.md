@@ -1,5 +1,15 @@
 # 运行与接入
 
+## INT8 编码器按任务卸载
+
+单卡 96GB 的长视频测试可使用 `H3_MODEL_LIFETIME=int8_encoder_offload`。两套模型在启动时各加载、量化一次；H3 transformer 和 VAE 常驻 GPU，text encoder 在 CPU 保持已量化状态。每单先清理上一单临时对象和空闲缓存，把 text encoder 搬上 GPU；条件编码文件保存后，将其搬回 CPU，等待 CUDA 同步并释放缓存，再执行去噪。下一单不会重新读盘或重新量化。
+
+本模式增加编码器 CPU/GPU 传输耗时，以换取去噪可用显存。`dual_int8` 保留原有双模型 GPU 常驻行为；BF16 `resident` 的行为保持原样。预检会用小型 INT8 线性层测试两次 CPU/CUDA 往返，并确认 GPU 输出完全一致，失败时在大模型加载前退出。
+
+日志包含 `moving quantized text encoder to GPU`、`offloading quantized text encoder to CPU` 和 `text encoder offload complete`。status 的 `timing.condition.transfer_s`、`offload_s` 分别记录搬入和移出时间；`release` 记录释放后的 allocated/reserved/free 显存，`lifecycle` 标识模式。`timing.*.wall_s` 包含传输及编码开销。
+
+本地测试覆盖连续两单仅加载/量化一次、编码器先卸载再去噪、生成器始终只上卡一次。10s/720p 和 15s/720p 是否满足实际显存预算，仍须在目标 GPU 实测。
+
 独立验收导出（使用合成渐变素材，768×1344 / 124 帧，无模型加载和 GPU 使用）：
 
 ```bash

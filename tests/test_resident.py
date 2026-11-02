@@ -10,6 +10,47 @@ from h3_service.infer.engine import LeaseLost
 
 
 class ResidentTests(unittest.TestCase):
+    def test_int8_encoder_offload_reuses_models_and_never_moves_generator(self):
+        import torch
+        pipes = [MagicMock(), MagicMock()]
+        pipes[0].text_encoder = torch.nn.Linear(2, 2, bias=False)
+        blocks = MagicMock()
+        blocks.load_pipeline.side_effect = pipes
+        eros = MagicMock()
+        eros.apply_eros.return_value = {'replaced': 634}
+        placements = []
+        def place(pipe, emit):
+            placements.append(pipe)
+            pipe.to('cuda')
+            return {'wall_s': 1.5}
+        def execute(mode, job, settings, **kwargs):
+            if mode == 'generate':
+                self.assertEqual(pipes[0].to.call_args.args, ('cpu',))
+            return {'stages': {}, 'load_s': 0}
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.dict('sys.modules', {'h3_service.infer.blocks': blocks, 'h3_service.infer.eros': eros}), \
+                patch('h3_service.infer.resident.available_memory', return_value=220 * 1024**3), \
+                patch('torch.cuda.mem_get_info', return_value=(40 * 1024**3, 95 * 1024**3)), \
+                patch('torch.cuda.memory_allocated', return_value=45 * 1024**3), \
+                patch('torch.cuda.memory_reserved', return_value=46 * 1024**3), \
+                patch('torch.cuda.synchronize'), patch('torch.cuda.empty_cache'), \
+                patch('h3_service.infer.transfer.place_on_gpu', side_effect=place), \
+                patch('h3_service.infer.quantization.quantize_int8wo', return_value={}) as quantize, \
+                patch('h3_service.infer.phase.execute', side_effect=execute):
+            models = ResidentModels(Settings(converted_cache=False, model_lifetime='int8_encoder_offload'), lambda s: None)
+            self.assertEqual(placements, [pipes[1]])
+            for _ in range(2):
+                condition = models.run('condition', {'directory': temp})
+                self.assertFalse(condition['gpu_retained'])
+                self.assertEqual(condition['transfer_s'], 1.5)
+                generated = models.run('generate', {'directory': temp})
+                self.assertTrue(generated['gpu_retained'])
+            self.assertEqual(quantize.call_count, 2)
+            self.assertEqual(blocks.load_pipeline.call_count, 2)
+            self.assertEqual([c.args for c in pipes[0].to.call_args_list],
+                             [('cuda',), ('cpu',), ('cuda',), ('cpu',)])
+            self.assertEqual([c.args for c in pipes[1].to.call_args_list], [('cuda',)])
+
     def test_container_limit_and_reclaimable_cache_bound_ram(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

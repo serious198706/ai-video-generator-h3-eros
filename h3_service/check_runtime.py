@@ -58,7 +58,7 @@ def check_runtime(attention='_native_cudnn', model_lifetime='resident'):
             if not torch.isfinite(output).all().item():
                 raise RuntimeError('cuDNN attention produced non-finite output')
         torch.cuda.synchronize()
-    if model_lifetime == 'dual_int8':
+    if model_lifetime in {'dual_int8', 'int8_encoder_offload'}:
         from importlib.metadata import version
         from torchao.quantization import quantize_
         from h3_service.infer.quantization import int8wo_config
@@ -69,6 +69,15 @@ def check_runtime(attention='_native_cudnn', model_lifetime='resident'):
             quantized_output = probe(torch.ones(1, 256, device='cuda', dtype=torch.bfloat16))
         if quantized_output.shape != (1, 256) or not torch.isfinite(quantized_output).all().item():
             raise RuntimeError('TorchAO INT8WO CUDA smoke test failed')
+        if model_lifetime == 'int8_encoder_offload':
+            for _ in range(2):
+                probe.to('cpu')
+                probe.to('cuda')
+                with torch.inference_mode():
+                    restored = probe(torch.ones(1, 256, device='cuda', dtype=torch.bfloat16))
+                torch.testing.assert_close(restored, quantized_output, rtol=0, atol=0)
+            del restored
+            report['int8wo_offload_roundtrip'] = 'passed: two CPU/CUDA cycles, exact output'
         del probe, quantized_output
         torch.cuda.empty_cache()
         report.update(torchao=version('torchao'), int8wo_smoke_test='passed')

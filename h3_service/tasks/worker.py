@@ -143,9 +143,11 @@ class Worker:
                       json.dumps(validation_summary(exc)))
             raise
         ident, request = envelope.task_id, envelope.request
-        if request.resolution == '1080p' and not self.settings.upscale_queue_url:
-            raise ValueError('H3_UPSCALE_QUEUE_URL is required for 1080p tasks')
         trace.accept(ident, request, message.get('Attributes', {}).get('ApproximateReceiveCount', '1'))
+        if request.resolution == '1080p' and not self.settings.upscale_queue_url:
+            LOG.error('1080p task blocked task=%s: H3_UPSCALE_QUEUE_URL is missing; '
+                      'configure the dedicated upscale queue and restart H3; message retained', ident)
+            raise ValueError('H3_UPSCALE_QUEUE_URL is required for 1080p tasks')
         LOG.info('task accepted task=%s resolution=%s duration=%s steps=%s audio=%s callback_requested=%s',
                  ident, request.resolution, request.duration, request.steps, request.audio, bool(request.webhook_url))
         receipt = message['ReceiptHandle']

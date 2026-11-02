@@ -48,8 +48,8 @@ class Settings:
             raise ValueError('generation and upscale queues must be different')
         if not self.staging_prefix.strip('/'):
             raise ValueError('H3_STAGING_PREFIX must be nonempty')
-        if self.model_lifetime not in {'resident', 'cold', 'dual_int8'}:
-            raise ValueError('H3_MODEL_LIFETIME must be resident, dual_int8 or cold')
+        if self.model_lifetime not in {'resident', 'cold', 'dual_int8', 'int8_encoder_offload'}:
+            raise ValueError('H3_MODEL_LIFETIME must be resident, dual_int8, int8_encoder_offload or cold')
         if self.dual_min_free_gib < 0:
             raise ValueError('H3_DUAL_MIN_FREE_GIB must be nonnegative')
         if not self.bucket or not self.queue_url or not self.public_base.startswith('https://'):
