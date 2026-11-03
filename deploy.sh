@@ -25,3 +25,4 @@ fi
 mkdir -p data
 "$H3_VENV_DIR/bin/python" -m pip freeze > data/installed-requirements.txt
 echo 'Installed and downloaded. Run benchmark.py on this GPU before accepting production tasks.'
+./service.sh install

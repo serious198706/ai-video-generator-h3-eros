@@ -46,8 +46,11 @@ class Settings:
     verify_mode: str = field(default_factory=lambda: os.getenv('H3_VERIFY_MODE', 'cached'))
     transformer_cache: Path = field(default_factory=lambda: Path(os.getenv('H3_TRANSFORMER_CACHE', str(ROOT / 'models/converted'))))
     converted_cache: bool = field(default_factory=lambda: os.getenv('H3_CONVERTED_CACHE', '1') == '1')
+    shutdown_grace: int = field(default_factory=lambda: int(os.getenv('H3_SHUTDOWN_GRACE', '900')))
 
     def validate_cloud(self):
+        if self.shutdown_grace < 0:
+            raise ValueError('H3_SHUTDOWN_GRACE must be nonnegative')
         if self.model_lifetime != 'dual_gpu' and self.upscale_queue_url and self.upscale_queue_url == self.queue_url:
             raise ValueError('generation and upscale queues must be different')
         if not self.staging_prefix.strip('/'):

@@ -38,6 +38,7 @@ class Engine:
         if job:
             command += ['--job', str(job)]
         environment = {**os.environ, 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
+                       'H3_OWNER_PID': str(os.getpid()),
                        'H3_MODEL_DIR': str(self.settings.model_dir.resolve()),
                        'H3_EROS_FILE': str(self.settings.eros_file.resolve()),
                        'H3_ATTENTION': self.settings.attention, 'H3_MIN_FREE_GIB': str(self.settings.min_free_gib)}

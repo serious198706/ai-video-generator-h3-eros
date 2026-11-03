@@ -42,10 +42,14 @@ def summarize(case, state):
     case['actual_duration'] = result.get('actual_duration', result.get('duration'))
     case['video_url'] = state.get('video_url')
     timing = case['timing']
-    case['generation_s'] = sum(
-        (timing.get(phase) or {}).get('wall_s', 0) for phase in ('condition', 'generate')
-    ) or None
-    case['upscale_s'] = (timing.get('upscale') or {}).get('wall_s')
+    if 'generation_s' in timing:
+        case['generation_s'] = timing.get('conditioning_s', 0) + timing['generation_s']
+        case['upscale_s'] = timing.get('upscale_s')
+    else:
+        case['generation_s'] = sum(
+            (timing.get(phase) or {}).get('wall_s', 0) for phase in ('condition', 'generate')
+        ) or None
+        case['upscale_s'] = (timing.get('upscale') or {}).get('wall_s')
 
 
 def main():

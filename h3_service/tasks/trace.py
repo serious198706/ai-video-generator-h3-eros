@@ -7,6 +7,7 @@ import traceback
 from pathlib import Path
 from contextlib import contextmanager
 from urllib.parse import urlsplit
+from datetime import datetime, timezone
 from h3_service.aws_diagnostics import details
 
 LOG = logging.getLogger('h3_service.tasks.worker')
@@ -40,6 +41,7 @@ class TaskTrace:
         self.metrics = {}
         self.active = None
         self.failed_stage = None
+        self.producer = {}
 
     def accept(self, ident, request, receive_count):
         self.ident = ident
@@ -84,8 +86,10 @@ class TaskTrace:
                    'failed_stage': self.failed_stage, 'sqs_deleted': self.deleted,
                    'callback': self.callback, 'total_s': round(time.monotonic() - self.started, 3),
                    'stages_s': {k: round(v, 3) for k, v in self.times.items()},
-                   'generation': self.metrics, 'request': self.request}
+                   'generation': self.metrics, 'request': self.request, 'producer': self.producer,
+                   'finished_at': datetime.now(timezone.utc).isoformat()}
         LOG.info('timing task=%s status=%s error=%s total_s=%.3f sqs_deleted=%s callback=%s details=%s',
                  self.ident, self.status, self.error, summary['total_s'], self.deleted, self.callback,
-                 json.dumps(summary, sort_keys=True, allow_nan=False))
+                 json.dumps({k: v for k, v in summary.items() if k not in {'generation', 'request'}},
+                            sort_keys=True, allow_nan=False))
         return summary

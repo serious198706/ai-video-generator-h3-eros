@@ -5,6 +5,8 @@ import tempfile
 import threading
 import time
 import traceback
+import os
+import re
 from pathlib import Path
 from pydantic import ValidationError
 from h3_service.contracts.models import Message, frame_count, normalize_stored_request, validation_summary
@@ -16,6 +18,8 @@ from h3_service.media.webhook import notify
 from h3_service.net.http import download, resolve
 from h3_service.aws_diagnostics import details
 from h3_service.tasks.trace import TaskTrace
+from h3_service.identity import attempt, task_context
+from h3_service.status import compact_timing, final_result
 
 LOG = logging.getLogger(__name__)
 TERMINAL = {'succeeded', 'failed'}
@@ -53,6 +57,9 @@ class Worker:
         self.received_messages = 0
         self.deleted_messages = 0
         self.last_task = None
+        self.started = time.monotonic()
+        self.accepting = True
+        self.resource_warnings = []
 
     def start(self):
         self.thread = threading.Thread(target=self.run, name='h3-worker', daemon=True)
@@ -61,9 +68,21 @@ class Worker:
     def shutdown(self):
         self.ready = False
         self.stop.set()
-        self.cancelled.set()
         if self.thread:
-            self.thread.join(timeout=45)
+            self.thread.join(timeout=self.settings.shutdown_grace)
+            if self.thread.is_alive():
+                LOG.warning('shutdown grace expired; cancelling in-flight work; messages remain unacknowledged')
+                self.cancelled.set()
+                self.thread.join(timeout=20)
+
+    def model_processes_alive(self):
+        owners = getattr(self.engine, 'owners', None)
+        owners = list(owners.values()) if isinstance(owners, dict) else [self.engine]
+        for owner in owners:
+            process = getattr(owner, 'process', None)
+            if process is not None and process.poll() is not None:
+                return False
+        return True
 
     def run(self):
         try:
@@ -71,7 +90,16 @@ class Worker:
             from h3_service.aws_setup import verify_credentials, verify_queue
             verify_credentials(self.settings.region)
             verify_queue(self.settings, self.sqs)
+            LOG.info('AWS STS and configured queue checks passed; starting model initialization')
+            original_progress = self.engine.progress if hasattr(self.engine, 'progress') else None
+            if original_progress is not None:
+                def startup_progress(message):
+                    self.init_progress = message
+                    original_progress(message)
+                self.engine.progress = startup_progress
             self.engine.preflight(self.cancelled)
+            if original_progress is not None:
+                self.engine.progress = original_progress
             self.ready = True
             LOG.info('worker ready; model initialization complete; waiting for SQS tasks')
             self.stage = 'idle'
@@ -80,6 +108,13 @@ class Worker:
                 self.run_pipeline()
                 return
             while not self.stop.is_set():
+                if not self.accepting:
+                    self.stop.wait(5)
+                    continue
+                if not self.model_processes_alive():
+                    self.error = 'resident_process_exited'
+                    self.cancelled.set()
+                    break
                 try:
                     polled = time.monotonic()
                     messages = self.sqs.receive_message(QueueUrl=self.settings.queue_url, MaxNumberOfMessages=1,
@@ -111,7 +146,13 @@ class Worker:
                 {'file': Path(f.filename).name, 'function': f.name, 'line': f.lineno}
                 for f in traceback.extract_tb(exc.__traceback__)[-8:]]
             if isinstance(exc, OSError):
-                diagnostic.update(filename=exc.filename, errno=exc.errno)
+                diagnostic.update(filename=exc.filename, errno=exc.errno, reason=exc.strerror)
+            elif isinstance(exc, (ValueError, RuntimeError)):
+                reason = str(exc)
+                for key, value in os.environ.items():
+                    if len(value) >= 4 and any(part in key.upper() for part in ('SECRET', 'TOKEN', 'PASSWORD', 'ACCESS_KEY')):
+                        reason = reason.replace(value, '<redacted>')
+                diagnostic['reason'] = re.sub(r'https?://\S+', '<url>', reason)[:500]
             LOG.error('worker initialization failed details=%s', json.dumps(diagnostic))
         finally:
             self.ready = False
@@ -140,7 +181,7 @@ class Worker:
                         self.last_task = worker.last_task
                         del pending[future]
                 self.active_tasks = [{'task_id': ident, 'stage': worker.stage} for ident, worker in pending.values()]
-                if not self.engine.healthy:
+                if not self.engine.healthy or not self.model_processes_alive():
                     self.error = 'resident_engine_unavailable'
                     self.ready = False
                     self.cancelled.set()
@@ -148,6 +189,9 @@ class Worker:
                     break
                 if len(pending) >= 2:
                     self.stop.wait(0.25)
+                    continue
+                if not self.accepting:
+                    self.stop.wait(5)
                     continue
                 try:
                     raw_messages = self.sqs.receive_message(QueueUrl=self.settings.queue_url,
@@ -162,6 +206,8 @@ class Worker:
                              len(pending), self.received_messages, self.deleted_messages)
                     last_idle = time.monotonic()
                 for raw in raw_messages:
+                    if self.stop.is_set():
+                        break
                     try:
                         ident = Message.model_validate_json(raw['Body']).task_id
                     except ValidationError:
@@ -179,6 +225,9 @@ class Worker:
 
     def handle(self, message):
         trace = TaskTrace()
+        provenance = attempt()
+        trace.producer = provenance
+        token = task_context.set(provenance)
         try:
             return self._handle(message, trace)
         except BaseException as exc:
@@ -189,11 +238,16 @@ class Worker:
             raise
         finally:
             summary = trace.finish()
-            if self.settings.model_lifetime == 'dual_gpu' and trace.ident:
+            if trace.ident:
                 from h3_service.infer.resident import atomic
                 report_dir = self.settings.work_dir / 'reports' / trace.ident
-                report_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-                atomic(report_dir / 'summary.json', summary)
+                try:
+                    report_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    atomic(report_dir / (provenance['attempt_id'] + '.json'), summary)
+                    atomic(report_dir / 'summary.json', summary)
+                except OSError as exc:
+                    LOG.error('diagnostic report write failed task=%s errno=%s', trace.ident, exc.errno)
+            task_context.reset(token)
 
     def _handle(self, message, trace):
         started = trace.started
@@ -212,6 +266,7 @@ class Worker:
             raise
         ident, request = envelope.task_id, envelope.request
         trace.accept(ident, request, message.get('Attributes', {}).get('ApproximateReceiveCount', '1'))
+        task_context.set({**trace.producer, 'task_id': ident})
         if request.resolution == '1080p' and self.settings.model_lifetime != 'dual_gpu' and not self.settings.upscale_queue_url:
             LOG.error('1080p task blocked task=%s: H3_UPSCALE_QUEUE_URL is missing; '
                       'configure the dedicated upscale queue and restart H3; message retained', ident)
@@ -248,6 +303,13 @@ class Worker:
             self.check()
             with lock:
                 state.update(changes)
+                if state['status'] == 'succeeded':
+                    for key in ('resolved', 'upload_started', 'upscale_message', 'upscale_handoff'):
+                        state.pop(key, None)
+                if state['status'] in TERMINAL and isinstance(state.get('timing'), dict):
+                    if 'generate' in state['timing'] or 'condition' in state['timing']:
+                        state['timing'] = compact_timing(state['timing'])
+                    state['timing']['task_total_s'] = round(time.monotonic() - started, 3)
                 with trace.measure('status_write'):
                     self.store.write(state)
                 trace.status, trace.error = state['status'], state.get('error')
@@ -258,6 +320,7 @@ class Worker:
                          ident, state['status'], state.get('stage'), state.get('error'))
 
         def heartbeat():
+            task_context.set({**trace.producer, 'task_id': ident})
             while not done.wait(self.settings.heartbeat):
                 try:
                     self.sqs.change_message_visibility(QueueUrl=self.settings.queue_url, ReceiptHandle=receipt,
@@ -301,7 +364,7 @@ class Worker:
                     if request.resolution == '1080p' and self.settings.model_lifetime != 'dual_gpu':
                         self.handoff_upscale(state, result, persist)
                     else:
-                        persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
+                        persist(status='succeeded', stage='complete', **final_result(result, state), video_url=self.store.video_url(ident))
                 elif int(message.get('Attributes', {}).get('ApproximateReceiveCount', '1')) >= self.settings.max_receive:
                     LOG.warning('task receive limit reached task=%s limit=%s; marking failed without generation', ident, self.settings.max_receive)
                     persist(status='failed', error='poisoned', stage='complete')
@@ -408,7 +471,7 @@ class Worker:
                     output, metrics = self.engine.generate(job, directory, self.cancelled, on_stage)
                 trace.metrics = metrics.get('timing', {})
                 LOG.info('generation complete task=%s elapsed_s=%.3f timing=%s', ident,
-                         time.monotonic() - generation_started, json.dumps(metrics.get('timing', {})))
+                         time.monotonic() - generation_started, json.dumps(compact_timing(metrics.get('timing', {}))))
                 if request.resolution == '1080p' and self.settings.model_lifetime == 'dual_gpu':
                     def on_upscale_stage(label):
                         persist(stage=label)
@@ -422,16 +485,13 @@ class Worker:
                 return
             self.check()
             result = {'seed': state['seed'], 'width': width, 'height': height, 'num_frames': frames, 'fps': 24,
-                      'actual_duration': frames / 24, 'audio_present': request.audio, 'model': metrics['model']}
+                      'actual_duration': frames / 24, 'audio_present': request.audio, 'model': metrics['model'],
+                      'producer': trace.producer}
             local_upscale = request.resolution == '1080p' and self.settings.model_lifetime == 'dual_gpu'
             if local_upscale:
                 result.update(width=sr['width'], height=sr['height'], upscaled=True)
-            status_timing = metrics['timing']
-            if self.settings.model_lifetime == 'dual_gpu':
-                status_timing = {phase: {key: value for key, value in timing.items()
-                    if key in {'wall_s', 'gpu_wait_s', 'gpu', 'peak_allocated_gib', 'peak_reserved_gib'}}
-                    for phase, timing in metrics['timing'].items()}
-            persist(stage='upload', timing=status_timing, upload_started=True)
+            status_timing = compact_timing(metrics['timing'])
+            persist(stage='upload', timing=status_timing, producer=trace.producer, upload_started=True)
             # Transport exceptions propagate: leave message unacked for recovery/retry.
             self.stage = 'upload'
             upload_started = time.monotonic()
@@ -442,10 +502,11 @@ class Worker:
                 else:
                     self.store.upload(ident, output, result, stamp)
             LOG.info('S3 video upload complete task=%s elapsed_s=%.3f', ident, time.monotonic() - upload_started)
+            state['timing']['upload_s'] = round(time.monotonic() - upload_started, 3)
             if request.resolution == '1080p' and not local_upscale:
                 self.handoff_upscale(state, result, persist)
             else:
-                persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
+                persist(status='succeeded', stage='complete', **final_result(result, state), video_url=self.store.video_url(ident))
 
     def handoff_upscale(self, state, result, persist):
         # Commit all generator-owned state before publishing. Heartbeat stops writing

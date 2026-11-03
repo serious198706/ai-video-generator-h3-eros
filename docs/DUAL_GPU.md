@@ -1,6 +1,6 @@
 # 双卡 INT8 本地超分流水线
 
-分支：`experiment/dual-gpu-local-upscale`。本地调度与恢复测试通过，尚未在 2×96GB GPU 上验收。
+原始双卡实现分支：`experiment/dual-gpu-local-upscale`，已完成两台 2×96GB 机器的六种组合生成测试。当前运维改造分支：`feat/supervisor-operations`，托管和日志见 [Supervisor 运维](SUPERVISOR.md)。
 
 ## 设备分工与并发
 
@@ -25,6 +25,7 @@ H3_GENERATE_GPU=1
 ```bash
 ./deploy.sh
 ./start.sh
+./service.sh status
 ```
 
 部署新增 opencv-python-headless、spandrel、spandrel_extra_arches，并下载带固定 SHA256 校验的 realesr-general-x4v3.pth。可用 H3_SR_MODEL 指定路径。模型进程的首次量化仍会产生冷启动成本。
@@ -35,9 +36,9 @@ H3_GENERATE_GPU=1
 
 `logs/h3.log` 包含线程名、task、GPU、role、phase、进度和计时；编码/生成/超分等待 GPU 时也更新 stage。SQS 任务的阶段日志使用原始 32 位 task_id，可直接检索整条链路。
 
-`data/reports/{task_id}/summary.json` 保存完整阶段诊断：请求的安全摘要、执行耗时、GPU 等待时间、显存峰值、失败阶段、SQS 删除结果和回调结果。文件权限 0600；不保存提示词正文和原图地址。文件记录最近一次投递，历史投递日志仍保留在 h3.log。
+`data/reports/{task_id}/{attempt_id}.json` 保存每次执行的完整阶段诊断：请求的安全摘要、执行耗时、GPU 等待时间、显存峰值、失败阶段、SQS 删除结果和回调结果；summary.json 指向最新执行的副本。文件权限 0600；不保存提示词正文和原图地址。
 
-status 的 result 仅含 seed、最终 width/height、num_frames、fps、actual_duration、audio_present、model 以及可选 upscaled。timing 每阶段仅保留 wall_s、gpu_wait_s、gpu、峰值显存；不把超分内部参数复制进 result。
+status 的 result 仅含 seed、最终 width/height、num_frames、fps、actual_duration、audio_present、model 以及可选 upscaled。producer 保存产出机器和代码版本。timing 仅保存关键耗时，显存及内部推理明细保留在本地诊断报告。
 
 wall_s 是拿到 GPU 执行权后的阶段耗时，gpu_wait_s 单列等待时间。完整端到端时间见日志和任务 summary，不能把有嵌套关系的 stages_s 全部相加。
 

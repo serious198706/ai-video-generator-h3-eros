@@ -42,6 +42,7 @@ class DualGpuEngine(Engine):
                 self.owners[role] = owner
                 owner.ipc = tempfile.TemporaryDirectory(prefix=role + '-', dir=self.settings.work_dir)
                 environment = {**os.environ, 'CUDA_VISIBLE_DEVICES': gpu,
+                    'H3_OWNER_PID': str(os.getpid()),
                     'H3_MODEL_LIFETIME': 'dual_gpu', 'H3_PROCESS_ROLE': role,
                     'H3_MODEL_DIR': str(self.settings.model_dir.resolve()),
                     'H3_EROS_FILE': str(self.settings.eros_file.resolve()),
@@ -82,12 +83,15 @@ class DualGpuEngine(Engine):
             owner.progress = lambda message: LOG.info('task=%s gpu=%s role=%s phase=%s %s', task, gpu, role, mode, message)
             ident = uuid.uuid4().hex
             started = time.monotonic()
+            (Path(owner.ipc.name) / 'progress.json').unlink(missing_ok=True)
             atomic(Path(owner.ipc.name) / 'command.json', {'id': ident, 'mode': mode, 'job': job})
             reply = Path(owner.ipc.name) / (ident + '.json')
             result = owner.wait_reply(reply, cancelled)
             reply.unlink()
             result.update(wall_s=time.monotonic() - started, gpu_wait_s=wait_s, gpu=gpu)
-            LOG.info('phase complete task=%s phase=%s gpu=%s timing=%s', task, mode, gpu, json.dumps(result))
+            LOG.info('phase complete task=%s phase=%s gpu=%s wall_s=%.3f gpu_wait_s=%.3f',
+                     task, mode, gpu, result['wall_s'], wait_s)
+            LOG.debug('phase diagnostic task=%s phase=%s metrics=%s', task, mode, json.dumps(result))
             return result
         except BaseException:
             self.healthy = False

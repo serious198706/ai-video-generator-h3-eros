@@ -112,6 +112,8 @@ def execute(mode, job, settings, progress=None, loaded_pipe=None, already_on_gpu
 
 
 def main():
+    from h3_service.infer.parent_guard import protect_parent
+    protect_parent()
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=['condition', 'generate', 'probe-runtime', 'probe-condition', 'probe-generate'])
     parser.add_argument('--job', type=Path)

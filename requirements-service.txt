@@ -5,3 +5,4 @@ boto3>=1.35,<2
 urllib3>=2.2,<3
 requests>=2.32,<3
 pillow>=11,<13
+supervisor>=4.3,<5

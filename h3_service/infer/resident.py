@@ -203,6 +203,8 @@ class ResidentModels:
 
 
 def serve(directory):
+    from h3_service.infer.parent_guard import protect_parent
+    protect_parent()
     from h3_service.config import Settings
     progress = directory / 'progress.json'
     def emit(stage):
@@ -313,6 +315,7 @@ class ResidentEngine(Engine):
         super().preflight(cancelled, **kwargs)
         self.ipc = tempfile.TemporaryDirectory(prefix='resident-', dir=self.settings.work_dir)
         environment = {**os.environ, 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
+                       'H3_OWNER_PID': str(os.getpid()),
                        'H3_MODEL_DIR': str(self.settings.model_dir.resolve()),
                        'H3_EROS_FILE': str(self.settings.eros_file.resolve()),
                        'H3_ATTENTION': self.settings.attention,
@@ -344,6 +347,7 @@ class ResidentEngine(Engine):
                 stage(label)
                 ident = uuid.uuid4().hex
                 started = time.monotonic()
+                (Path(self.ipc.name) / 'progress.json').unlink(missing_ok=True)
                 atomic(Path(self.ipc.name) / 'command.json', {'id': ident, 'mode': mode,
                        'job': {**job, 'directory': str(directory.resolve())}})
                 reply = Path(self.ipc.name) / (ident + '.json')

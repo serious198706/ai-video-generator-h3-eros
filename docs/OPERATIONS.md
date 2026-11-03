@@ -1,5 +1,7 @@
 # 运行与接入
 
+当前分支的默认启动方式已改为 Supervisor：`./start.sh` 后台托管启动，`./service.sh status` 查看模型就绪，`./logs.sh` 筛选日志。完整配置、精简 status、机器来源及退出恢复以 [Supervisor 运维](SUPERVISOR.md) 为准。下文早期单卡模式中的嵌套 timing 字段已移入本地每次执行诊断；当前 status 只保留关键耗时。
+
 ## INT8 编码器按任务卸载
 
 单卡 96GB 的长视频测试可使用 `H3_MODEL_LIFETIME=int8_encoder_offload`。两套模型在启动时各加载、量化一次；H3 transformer 和 VAE 常驻 GPU，text encoder 在 CPU 保持已量化状态。每单先清理上一单临时对象和空闲缓存，把 text encoder 搬上 GPU；条件编码文件保存后，将其搬回 CPU，等待 CUDA 同步并释放缓存，再执行去噪。下一单不会重新读盘或重新量化。
