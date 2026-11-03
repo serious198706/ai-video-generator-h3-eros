@@ -49,7 +49,7 @@ class ResidentModels:
         self.active_mode = None
         self.last_release = {}
         self.encoder_offload = settings.model_lifetime == 'int8_encoder_offload'
-        self.dual_int8 = settings.model_lifetime in {'dual_int8', 'int8_encoder_offload'}
+        self.dual_int8 = settings.model_lifetime in {'dual_int8', 'int8_encoder_offload', 'dual_gpu'}
         self.quantization = {}
         # Initial budget is deliberately conservative and configurable; no silent cold fallback.
         self.check_memory(settings.resident_min_ram_gib)
@@ -60,6 +60,8 @@ class ResidentModels:
             emit('validating CPU parameter restore on CUDA before loading large models')
             emit('CPU parameter restore CUDA check: ' + validate_cuda())
         for mode, conditioner in [('condition', True), ('generate', False)]:
+            if settings.process_role and mode != settings.process_role:
+                continue
             emit(f'loading resident {mode} into CPU memory')
             if conditioner:
                 pipe = load_pipeline(settings.model_dir, conditioner=True, progress=emit)
@@ -85,7 +87,7 @@ class ResidentModels:
                 self.offload(pipe, mode)
         if self.dual_int8:
             from h3_service.infer.transfer import place_on_gpu
-            for mode in (('generate',) if self.encoder_offload else ('condition', 'generate')):
+            for mode in (('generate',) if self.encoder_offload else tuple(self.pipes)):
                 emit(f'placing quantized {mode} permanently on GPU')
                 place_on_gpu(self.pipes[mode], emit)
                 free, total = torch.cuda.mem_get_info()
@@ -129,6 +131,10 @@ class ResidentModels:
 
     def run(self, mode, job):
         from h3_service.infer.phase import execute
+        if mode == 'upscale':
+            if self.settings.process_role != 'condition':
+                raise RuntimeError('upscale must run on conditioner GPU')
+            return self.sr.run(Path(job['source']), Path(job['output']), preserve_audio=True, progress=self.emit)
         self.check_memory(16)
         if self.dual_int8:
             pipe = self.pipes[mode]
@@ -205,7 +211,19 @@ def serve(directory):
     startup = True
     try:
         emit('importing resident model dependencies')
+        if Settings().model_lifetime == 'dual_gpu':
+            from h3_service.check_runtime import check_runtime
+            if Settings().process_role not in {'condition', 'generate'}:
+                raise ValueError('dual_gpu model owner requires an explicit role')
+            check_runtime(Settings().attention, 'dual_gpu')
         models = ResidentModels(Settings(), emit)
+        if models.settings.process_role == 'condition':
+            from types import SimpleNamespace
+            from h3_service.infer.sr.engine import UpscaleEngine
+            models.sr = UpscaleEngine(SimpleNamespace(model=models.settings.sr_model,
+                resize='cpu_lanczos', tile=0, tile_pad=24, crf=16, preset='fast'))
+            models.sr.load()
+            emit('conditioner and compact SR ready on the same GPU; both models remain resident')
         startup = False
         atomic(reply, {'ok': True})
         command = directory / 'command.json'
@@ -225,6 +243,15 @@ def serve(directory):
                              for f in traceback.extract_tb(exc.__traceback__)]}
         if startup:
             failure['detail'] = str(exc)[:500]
+        if type(exc).__name__ == 'OutOfMemoryError':
+            failure['detail'] = str(exc)[:1500]
+            try:
+                import torch
+                failure['gpu_memory'] = {'allocated_gib': torch.cuda.memory_allocated() / 1024**3,
+                    'reserved_gib': torch.cuda.memory_reserved() / 1024**3,
+                    'free_gib': torch.cuda.mem_get_info()[0] / 1024**3}
+            except Exception:
+                pass
         atomic(reply, failure)
         return 1
 
@@ -264,7 +291,7 @@ class ResidentEngine(Engine):
                 response = json.loads(path.read_text())
                 if not response['ok']:
                     self.progress(f'Resident process failure: {response}')
-                    raise GenerationError('resident_failed')
+                    raise GenerationError('cuda_oom' if response.get('error') == 'OutOfMemoryError' else 'resident_failed')
                 return response.get('result')
             if self.process.poll() is not None:
                 raise GenerationError('resident_process_exited')

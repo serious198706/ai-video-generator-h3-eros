@@ -12,3 +12,6 @@ huggingface-hub==1.24.0
 safetensors>=0.8,<1
 numpy>=2,<3
 av>=14
+opencv-python-headless>=4.10,<5
+spandrel>=0.4,<0.5
+spandrel_extra_arches>=0.2,<0.3

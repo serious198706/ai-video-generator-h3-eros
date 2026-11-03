@@ -65,7 +65,8 @@ def main():
         settings = Settings()
         if args.resident:
             from h3_service.infer.resident import ResidentEngine
-            engine = ResidentEngine(settings, progress=log)
+            from h3_service.infer.dual_gpu import DualGpuEngine
+            engine = (DualGpuEngine if settings.model_lifetime == 'dual_gpu' else ResidentEngine)(settings, progress=log)
         else:
             engine = Engine(settings, progress=log)
         cancelled = threading.Event()
@@ -106,6 +107,9 @@ def main():
             log(f'Generation {run + 1}/{args.runs}; resident={args.resident}')
             run_started = time.monotonic()
             video_path, metrics = engine.generate(job, run_directory, cancelled, on_stage)
+            if settings.model_lifetime == 'dual_gpu' and request.resolution == '1080p':
+                video_path, sr = engine.upscale(video_path, run_directory, cancelled, on_stage)
+                metrics['timing']['upscale'] = sr
             metrics['generation_wall_s'] = time.monotonic() - run_started
             if stage_name is not None:
                 log(f'Stage finished: {stage_name} ({time.monotonic() - stage_started:.1f}s)')

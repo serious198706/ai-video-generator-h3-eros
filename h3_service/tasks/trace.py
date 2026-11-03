@@ -88,3 +88,4 @@ class TaskTrace:
         LOG.info('timing task=%s status=%s error=%s total_s=%.3f sqs_deleted=%s callback=%s details=%s',
                  self.ident, self.status, self.error, summary['total_s'], self.deleted, self.callback,
                  json.dumps(summary, sort_keys=True, allow_nan=False))
+        return summary

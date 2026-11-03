@@ -19,6 +19,9 @@ fi
 if [[ "${H3_AWS_SETUP:-1}" == 1 ]]; then ./setup-aws.sh; fi
 "$H3_VENV_DIR/bin/python" -m h3_service.check_runtime
 "$H3_VENV_DIR/bin/python" -m h3_service.download_models
+if [[ "${H3_MODEL_LIFETIME:-resident}" == dual_gpu ]]; then
+  "$H3_VENV_DIR/bin/python" -m h3_service.infer.download_sr
+fi
 mkdir -p data
 "$H3_VENV_DIR/bin/python" -m pip freeze > data/installed-requirements.txt
 echo 'Installed and downloaded. Run benchmark.py on this GPU before accepting production tasks.'

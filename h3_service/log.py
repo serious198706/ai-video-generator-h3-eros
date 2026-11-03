@@ -11,5 +11,5 @@ def setup_logging():
     path = directory / 'h3.log'
     file = TimedRotatingFileHandler(path, when='midnight', backupCount=30, encoding='utf-8')
     os.chmod(path, 0o600)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s',
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s [%(threadName)s] %(message)s',
                         handlers=[logging.StreamHandler(), file], force=True)

@@ -58,7 +58,7 @@ def check_runtime(attention='_native_cudnn', model_lifetime='resident'):
             if not torch.isfinite(output).all().item():
                 raise RuntimeError('cuDNN attention produced non-finite output')
         torch.cuda.synchronize()
-    if model_lifetime in {'dual_int8', 'int8_encoder_offload'}:
+    if model_lifetime in {'dual_int8', 'int8_encoder_offload', 'dual_gpu'}:
         from importlib.metadata import version
         from torchao.quantization import quantize_
         from h3_service.infer.quantization import int8wo_config

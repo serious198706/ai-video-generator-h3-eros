@@ -76,6 +76,9 @@ class Worker:
             LOG.info('worker ready; model initialization complete; waiting for SQS tasks')
             self.stage = 'idle'
             last_idle = time.monotonic()
+            if self.settings.model_lifetime == 'dual_gpu':
+                self.run_pipeline()
+                return
             while not self.stop.is_set():
                 try:
                     polled = time.monotonic()
@@ -114,6 +117,60 @@ class Worker:
         if self.cancelled.is_set():
             raise LeaseLost('worker stopped or lease uncertain')
 
+    def run_pipeline(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.active_tasks = []
+        pending = {}
+        last_idle = time.monotonic()
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix='h3-task') as executor:
+            while not self.stop.is_set():
+                for future, (ident, worker) in list(pending.items()):
+                    if future.done():
+                        try:
+                            future.result()
+                        except Exception as exc:
+                            LOG.error('pipeline task retained task=%s details=%s', ident, json.dumps(details(exc)))
+                        self.deleted_messages += worker.deleted_messages
+                        self.last_task = worker.last_task
+                        del pending[future]
+                self.active_tasks = [{'task_id': ident, 'stage': worker.stage} for ident, worker in pending.values()]
+                if not self.engine.healthy:
+                    self.error = 'resident_engine_unavailable'
+                    self.ready = False
+                    self.cancelled.set()
+                    self.stop.set()
+                    break
+                if len(pending) >= 2:
+                    self.stop.wait(0.25)
+                    continue
+                try:
+                    raw_messages = self.sqs.receive_message(QueueUrl=self.settings.queue_url,
+                        MaxNumberOfMessages=1, WaitTimeSeconds=5, VisibilityTimeout=self.settings.visibility,
+                        MessageSystemAttributeNames=['ApproximateReceiveCount']).get('Messages', [])
+                except Exception as exc:
+                    LOG.error('pipeline queue poll failed details=%s', json.dumps(details(exc)))
+                    self.stop.wait(5)
+                    continue
+                if not raw_messages and time.monotonic() - last_idle > 60:
+                    LOG.info('pipeline polling active in_flight=%s received=%s deleted=%s',
+                             len(pending), self.received_messages, self.deleted_messages)
+                    last_idle = time.monotonic()
+                for raw in raw_messages:
+                    try:
+                        ident = Message.model_validate_json(raw['Body']).task_id
+                    except ValidationError:
+                        ident = None
+                    if ident and any(ident == item[0] for item in pending.values()):
+                        self.sqs.change_message_visibility(QueueUrl=self.settings.queue_url,
+                            ReceiptHandle=raw['ReceiptHandle'], VisibilityTimeout=30)
+                        LOG.info('duplicate active delivery deferred task=%s', ident)
+                        continue
+                    child = Worker(self.settings, self.store, self.sqs, self.engine)
+                    child.stop, child.cancelled = self.stop, self.cancelled
+                    child.ready = True
+                    self.received_messages += 1
+                    pending[executor.submit(child.handle, raw)] = (ident, child)
+
     def handle(self, message):
         trace = TaskTrace()
         try:
@@ -125,7 +182,12 @@ class Worker:
             trace.failure(exc)
             raise
         finally:
-            trace.finish()
+            summary = trace.finish()
+            if self.settings.model_lifetime == 'dual_gpu' and trace.ident:
+                from h3_service.infer.resident import atomic
+                report_dir = self.settings.work_dir / 'reports' / trace.ident
+                report_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                atomic(report_dir / 'summary.json', summary)
 
     def _handle(self, message, trace):
         started = trace.started
@@ -144,7 +206,7 @@ class Worker:
             raise
         ident, request = envelope.task_id, envelope.request
         trace.accept(ident, request, message.get('Attributes', {}).get('ApproximateReceiveCount', '1'))
-        if request.resolution == '1080p' and not self.settings.upscale_queue_url:
+        if request.resolution == '1080p' and self.settings.model_lifetime != 'dual_gpu' and not self.settings.upscale_queue_url:
             LOG.error('1080p task blocked task=%s: H3_UPSCALE_QUEUE_URL is missing; '
                       'configure the dedicated upscale queue and restart H3; message retained', ident)
             raise ValueError('H3_UPSCALE_QUEUE_URL is required for 1080p tasks')
@@ -226,11 +288,11 @@ class Worker:
                 if recover_upload:
                     LOG.info('upload recovery check start task=%s', ident)
                 with trace.measure('upload_recovery'):
-                    result = (self.store.recover(ident, stamp, native=True) if request.resolution == '1080p'
+                    result = (self.store.recover(ident, stamp, native=True) if request.resolution == '1080p' and self.settings.model_lifetime != 'dual_gpu'
                               else self.store.recover(ident, stamp)) if recover_upload else None
                 if result is not None:
                     LOG.info('upload recovery found existing video task=%s; generation skipped', ident)
-                    if request.resolution == '1080p':
+                    if request.resolution == '1080p' and self.settings.model_lifetime != 'dual_gpu':
                         self.handoff_upscale(state, result, persist)
                     else:
                         persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))
@@ -341,6 +403,13 @@ class Worker:
                 trace.metrics = metrics.get('timing', {})
                 LOG.info('generation complete task=%s elapsed_s=%.3f timing=%s', ident,
                          time.monotonic() - generation_started, json.dumps(metrics.get('timing', {})))
+                if request.resolution == '1080p' and self.settings.model_lifetime == 'dual_gpu':
+                    def on_upscale_stage(label):
+                        persist(stage=label)
+                    with trace.measure('local_upscale'):
+                        output, sr = self.engine.upscale(output, directory, self.cancelled, on_upscale_stage)
+                    metrics['timing']['upscale'] = sr
+                    trace.metrics = metrics['timing']
             except GenerationError as exc:
                 LOG.error('generation failed task=%s error=%s', ident, exc.code)
                 persist(status='failed', stage='complete', error=exc.code)
@@ -348,18 +417,26 @@ class Worker:
             self.check()
             result = {'seed': state['seed'], 'width': width, 'height': height, 'num_frames': frames, 'fps': 24,
                       'actual_duration': frames / 24, 'audio_present': request.audio, 'model': metrics['model']}
-            persist(stage='upload', timing=metrics['timing'], upload_started=True)
+            local_upscale = request.resolution == '1080p' and self.settings.model_lifetime == 'dual_gpu'
+            if local_upscale:
+                result.update(width=sr['width'], height=sr['height'], upscaled=True)
+            status_timing = metrics['timing']
+            if self.settings.model_lifetime == 'dual_gpu':
+                status_timing = {phase: {key: value for key, value in timing.items()
+                    if key in {'wall_s', 'gpu_wait_s', 'gpu', 'peak_allocated_gib', 'peak_reserved_gib'}}
+                    for phase, timing in metrics['timing'].items()}
+            persist(stage='upload', timing=status_timing, upload_started=True)
             # Transport exceptions propagate: leave message unacked for recovery/retry.
             self.stage = 'upload'
             upload_started = time.monotonic()
             LOG.info('S3 video upload start task=%s', ident)
             with trace.measure('upload'):
-                if request.resolution == '1080p':
+                if request.resolution == '1080p' and not local_upscale:
                     self.store.upload(ident, output, result, stamp, native=True)
                 else:
                     self.store.upload(ident, output, result, stamp)
             LOG.info('S3 video upload complete task=%s elapsed_s=%.3f', ident, time.monotonic() - upload_started)
-            if request.resolution == '1080p':
+            if request.resolution == '1080p' and not local_upscale:
                 self.handoff_upscale(state, result, persist)
             else:
                 persist(status='succeeded', stage='complete', result=result, video_url=self.store.video_url(ident))

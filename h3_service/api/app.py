@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from h3_service.config import Settings
 from h3_service.infer.engine import Engine
 from h3_service.infer.resident import ResidentEngine
+from h3_service.infer.dual_gpu import DualGpuEngine
 from h3_service.media.cloud import Store, clients
 from h3_service.tasks.worker import Worker
 from h3_service.log import setup_logging
@@ -20,6 +21,8 @@ async def lifespan(app):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         s3, sqs = clients(settings)
         engine_class = ResidentEngine if settings.model_lifetime in {'resident', 'dual_int8', 'int8_encoder_offload'} else Engine
+        if settings.model_lifetime == 'dual_gpu':
+            engine_class = DualGpuEngine
         worker = Worker(settings, Store(settings, s3), sqs, engine_class(settings))
         app.state.worker = worker
         worker.start()
@@ -36,6 +39,7 @@ app = FastAPI(title='H3 GPU Worker', lifespan=lifespan, docs_url=None, redoc_url
 def health():
     worker = app.state.worker
     return {'ok': True, 'model_ready': worker.ready, 'task_id': worker.current, 'error': worker.error,
+            'active_tasks': getattr(worker, 'active_tasks', []),
             'task_stage': worker.stage, 'received_messages': worker.received_messages,
             'deleted_messages': worker.deleted_messages, 'last_task': worker.last_task}
 
