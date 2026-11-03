@@ -8,6 +8,16 @@ from h3_service.infer.manifest import (
 )
 
 
+def manifest_files(root):
+    """Include snapshot assets, excluding transfer/cache artifacts."""
+    for path in sorted(root.rglob('*')):
+        relative = path.relative_to(root)
+        if (path.is_file() and path.name != 'h3-manifest.json'
+                and not any(part.startswith('.') for part in relative.parts)
+                and not path.name.endswith(('.tmp', '.partial', '.incomplete', '.lock'))):
+            yield path
+
+
 def main():
     from huggingface_hub import snapshot_download, hf_hub_download
     settings = Settings()
@@ -37,8 +47,7 @@ def main():
     index_path.write_text(json.dumps(index, indent=2))
     print('Hashing local base components for the immutable manifest.', flush=True)
     hashes = {str(p.relative_to(settings.model_dir)): sha256(p)
-              for p in sorted(settings.model_dir.rglob('*'))
-              if p.is_file() and '.cache' not in p.parts and p.name != 'h3-manifest.json'}
+              for p in manifest_files(settings.model_dir)}
     (settings.model_dir / 'h3-manifest.json').write_text(json.dumps({'revision': BASE_REVISION, 'files': hashes}, indent=2))
     print('Pinned model files downloaded and hashed. GPU validation has not run.')
     return 0

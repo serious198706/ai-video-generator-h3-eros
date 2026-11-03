@@ -106,7 +106,13 @@ class Worker:
                     self.stop.set()
         except Exception as exc:
             self.error = type(exc).__name__
-            LOG.error('worker initialization failed details=%s', json.dumps(details(exc)))
+            diagnostic = details(exc)
+            diagnostic['trace'] = [
+                {'file': Path(f.filename).name, 'function': f.name, 'line': f.lineno}
+                for f in traceback.extract_tb(exc.__traceback__)[-8:]]
+            if isinstance(exc, OSError):
+                diagnostic.update(filename=exc.filename, errno=exc.errno)
+            LOG.error('worker initialization failed details=%s', json.dumps(diagnostic))
         finally:
             self.ready = False
             close = getattr(self.engine, 'close', None)
