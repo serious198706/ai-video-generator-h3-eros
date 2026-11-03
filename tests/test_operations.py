@@ -23,6 +23,17 @@ from tests import test_worker_api
 
 
 class OperationsTests(unittest.TestCase):
+    def test_port_conflict_fails_before_any_worker_or_model_start(self):
+        import asyncio
+        import socket
+        from h3_service.serve import run
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0)); listener.listen()
+            with patch.dict(os.environ, {'H3_PORT': str(listener.getsockname()[1])}), \
+                 patch('h3_service.api.app.Worker.start') as start:
+                self.assertEqual(asyncio.run(run()), 1)
+                start.assert_not_called()
+
     def test_actual_uvicorn_runner_exits_nonzero_when_worker_initialization_fails(self):
         import asyncio
         from h3_service.api.app import app

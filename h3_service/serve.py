@@ -40,7 +40,12 @@ async def run(app=None):
         from h3_service.api.app import app
     server = uvicorn.Server(uvicorn.Config(app, host=os.getenv('H3_BIND', '127.0.0.1'),
         port=int(os.getenv('H3_PORT', '8001')), access_log=False, workers=1))
-    task = asyncio.create_task(server.serve())
+    # Reserve the port before lifespan starts AWS polling or loading expensive models.
+    try:
+        listener = server.config.bind_socket()
+    except SystemExit:
+        return 1
+    task = asyncio.create_task(server.serve(sockets=[listener]))
     failed = False
     last_cleanup = 0
     last_resources = 0
@@ -81,6 +86,7 @@ async def run(app=None):
         if not task.done():
             server.should_exit = True
             await task
+        listener.close()
 
 
 def main(app=None):
