@@ -2,6 +2,9 @@ import fcntl
 import logging
 import os
 import time
+import shutil
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from h3_service.config import Settings
@@ -30,10 +33,23 @@ async def lifespan(app):
         logging.getLogger(__name__).warning('SIMULATION using real SQS/S3; producer=%s bucket=%s status_prefix=%s',
                                             producer(), settings.bucket, settings.status_prefix)
         worker.start()
+        awake = None
+        if sys.platform == 'darwin' and shutil.which('caffeinate'):
+            try:
+                awake = subprocess.Popen(['caffeinate', '-i', '-w', str(os.getpid())],
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError as exc:
+                logging.getLogger(__name__).warning('simulation sleep guard unavailable errno=%s', exc.errno)
         try:
             yield
         finally:
             worker.shutdown()
+            if awake is not None and awake.poll() is None:
+                awake.terminate()
+                try:
+                    awake.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    awake.kill(); awake.wait()
 
 
 app = FastAPI(title='H3 Local Latency Simulator', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)

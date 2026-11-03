@@ -19,6 +19,8 @@ SQS/S3 使用真实 AWS；只有生成 worker 在本机运行。复用正式 Wor
 
 本地已安装依赖时，后续无需重跑 deploy：`./sim.sh install` 安装托管配置，`./sim.sh start` 启动即可。simulator 的 Supervisor/socket/report/log 与正式服务分开，默认 HTTP 为 127.0.0.1:8021。
 
+macOS 上服务会启动绑定自身 PID 的 caffeinate 防止空闲自动睡眠，退出时释放，不修改系统电源设置。手动睡眠、合盖和网络断开仍可能影响长时间测试。
+
 **只有模拟 worker 应消费本次测试队列。** 若继续使用现有 Lambda/API 发送 50 条，保持相同 queue 和 status prefix，同时停用该队列上的真实 GPU worker；否则两种 worker 会竞争任务。也可以在 .env.simulator 指向独立测试队列和前缀。模拟服务不会创建或清空 AWS 队列/bucket，不更改已部署 Lambda。
 
 请求沿用已跑通的格式：
@@ -96,6 +98,8 @@ SQS/S3 使用真实 AWS；只有生成 worker 在本机运行。复用正式 Wor
 - submitted_to_result_s：同一发送时间到首次写入最终成功/失败状态前的时长，含等待、模拟处理和上传；不等于客户端发起 HTTP 到收到响应的计时。
 
 报告分别统计 min/p50/p95/max，最大 queue_s 和最大 wait_until_generation_s 回答不同口径的“排队多久”。来自重投的 queue_s 也包含前次执行及不可见期，应同时看执行报告的 receive_count。report 读取本地诊断，不反复查询 S3；只有已结束的任务进入统计，等50条都完成才是完整结论。
+
+即使不运行 report 命令，worker 每完成一条也自动更新 `data/simulator/auto-report/report.json` 和 report.csv，按当前 run 汇总；默认目标50条，可用 H3_SIM_EXPECTED_TASKS 调整。交互报表与自动报表分开存储，互不覆盖。
 
 ## status 与占位文件
 

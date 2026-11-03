@@ -1,4 +1,6 @@
 import time
+import os
+import logging
 from datetime import datetime, timezone
 from PIL import Image
 from h3_service.tasks.worker import Worker
@@ -6,6 +8,23 @@ from h3_service.simulator.engine import request_context
 
 
 class SimulationWorker(Worker):
+    def handle(self, message):
+        try:
+            return super().handle(message)
+        finally:
+            # Each delivery report is already persisted by the real runner.
+            # A separate output avoids racing the interactive report command.
+            from h3_service.simulator.cli import task_rows, aggregate, save
+            from h3_service.identity import producer
+            try:
+                with self.engine.report_lock:
+                    rows = task_rows(self.settings.work_dir / 'reports', run=producer()['run_id'])
+                    summary = aggregate(rows, int(os.getenv('H3_SIM_EXPECTED_TASKS', '50')))
+                    summary['run_id'] = producer()['run_id']
+                    save(self.settings.work_dir / 'auto-report', rows, summary)
+            except (OSError, ValueError, KeyError) as exc:
+                logging.getLogger(__name__).error('simulation aggregate report failed type=%s', type(exc).__name__)
+
     def new_child(self):
         return SimulationWorker(self.settings, self.store, self.sqs, self.engine)
 

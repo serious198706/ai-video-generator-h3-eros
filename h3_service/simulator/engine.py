@@ -28,6 +28,7 @@ class SimulatedEngine(Engine):
             raise ValueError('H3_SIM_PROFILE must be 6000-s or 6000-maxq')
         self.table = profiles[self.profile]
         self.locks = {'condition': threading.Lock(), 'generate': threading.Lock()}
+        self.report_lock = threading.Lock()
         self.healthy = False
 
     @staticmethod

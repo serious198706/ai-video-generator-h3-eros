@@ -136,4 +136,6 @@ class SimulatorQueueTests(unittest.TestCase):
             self.assertEqual(result['succeeded'], 50)
             self.assertEqual(result['messages_deleted'], 50)
             self.assertGreater(result['queue_s']['max'], result['queue_s']['min'])
+            automatic = json.loads((Path(temp) / 'auto-report' / 'report.json').read_text())
+            self.assertEqual(automatic['summary']['messages_deleted'], 50)
             self.assertEqual(len(sqs.receive_message(QueueUrl=url).get('Messages', [])), 0)
