@@ -10,9 +10,10 @@ from pathlib import Path
 from h3_service.config import ROOT, Settings
 
 
-def configuration(root, directory, python, grace):
+def configuration(root, directory, python, grace, entry=None):
     # Supervisor expands percent signs and treats semicolons as comments.
-    for path in (root, directory, python):
+    entry = Path(entry) if entry else root / 'start.sh'
+    for path in (root, directory, python, entry):
         if any(c in str(path) for c in '\n\r%;'):
             raise ValueError('service paths cannot contain newline, percent or semicolon')
     return f'''[unix_http_server]
@@ -31,7 +32,7 @@ supervisor.rpcinterface_factory=supervisor.rpcinterface:make_main_rpcinterface
 serverurl=unix://{directory}/supervisor.sock
 [program:h3]
 directory={root}
-command=/bin/bash {shlex.quote(str(root / 'start.sh'))} --foreground
+command=/bin/bash {shlex.quote(str(entry))} --foreground
 environment=H3_MANAGED="1"
 autostart=true
 autorestart=unexpected
@@ -54,6 +55,7 @@ def main():
     parser = argparse.ArgumentParser(description='Manage the private H3 Supervisor; never controls Vast services.')
     parser.add_argument('action', choices=['install', 'start', 'stop', 'restart', 'status', 'logs', 'reset', 'shutdown'])
     args = parser.parse_args()
+    control = './' + Path(os.getenv('H3_SERVICE_ENTRY', 'service.sh')).name
     settings = Settings()
     directory = settings.work_dir.resolve() / 'service'
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -67,24 +69,25 @@ def main():
     with (directory / 'manager.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if args.action == 'install':
-            text = configuration(ROOT, directory, Path(sys.executable), settings.shutdown_grace)
+            text = configuration(ROOT, directory, Path(sys.executable), settings.shutdown_grace,
+                                 entry=os.getenv('H3_SERVICE_ENTRY'))
             if config.exists() and config.read_text() != text:
                 alive = subprocess.run(ctl + ['pid'], capture_output=True).returncode == 0
                 if alive:
-                    parser.error('Supervisor is running with another configuration; ./service.sh shutdown before reinstalling')
+                    parser.error(f'Supervisor is running with another configuration; {control} shutdown before reinstalling')
             temporary = config.with_suffix('.tmp')
             temporary.write_text(text)
             temporary.chmod(0o600)
             temporary.replace(config)
             if (ROOT / '.env').exists():
                 (ROOT / '.env').chmod(0o600)
-            print(f'Installed {config}. No service started or restarted. Use ./service.sh start.')
+            print(f'Installed {config}. No service started or restarted. Use {control} start.')
             return 0
         if not config.exists():
-            parser.error('Run ./service.sh install first')
+            parser.error(f'Run {control} install first')
         if args.action == 'reset':
             (directory / 'failures.json').unlink(missing_ok=True)
-            print('Automatic restart budget reset. Use ./service.sh start after fixing the cause.')
+            print(f'Automatic restart budget reset. Use {control} start after fixing the cause.')
             return 0
         alive = subprocess.run(ctl + ['pid'], capture_output=True).returncode == 0
         if args.action in {'start', 'restart'}:
@@ -109,7 +112,7 @@ def main():
                 result = subprocess.run(ctl + [args.action, 'h3'])
                 if result.returncode:
                     return result.returncode
-            print('Process launch requested. RUNNING does not mean model ready; use ./service.sh status.')
+            print(f'Process launch requested. RUNNING does not mean model ready; use {control} status.')
             return 0
         if not alive:
             print('H3 Supervisor is not running.')

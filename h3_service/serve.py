@@ -34,9 +34,10 @@ def fatal_reason(worker, startup_timeout):
     return None
 
 
-async def run():
+async def run(app=None):
     import uvicorn
-    from h3_service.api.app import app
+    if app is None:
+        from h3_service.api.app import app
     server = uvicorn.Server(uvicorn.Config(app, host=os.getenv('H3_BIND', '127.0.0.1'),
         port=int(os.getenv('H3_PORT', '8001')), access_log=False, workers=1))
     task = asyncio.create_task(server.serve())
@@ -82,16 +83,17 @@ async def run():
             await task
 
 
-def main():
+def main(app=None):
     os.umask(0o077)
     from h3_service.config import Settings
     managed = os.getenv('H3_MANAGED') == '1'
     budget = Settings().work_dir / 'service' / 'failures.json'
     if managed and not restart_budget(budget):
-        print('Automatic restart limit reached. Inspect logs, fix the cause, then ./service.sh reset.', flush=True)
+        control = './' + Path(os.getenv('H3_SERVICE_ENTRY', 'service.sh')).name
+        print(f'Automatic restart limit reached. Inspect logs, fix the cause, then {control} reset.', flush=True)
         return 78
     try:
-        code = asyncio.run(run())
+        code = asyncio.run(run(app))
     except Exception as exc:
         logging.getLogger(__name__).error('service entry failed type=%s', type(exc).__name__)
         code = 1

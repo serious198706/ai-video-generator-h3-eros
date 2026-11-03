@@ -1,0 +1,18 @@
+{
+  "6000-s": {
+    "5/720p": {"condition": 1.252, "generate": 51.033, "upscale": 0},
+    "5/1080p": {"condition": 0.751, "generate": 48.531, "upscale": 6.505},
+    "10/720p": {"condition": 0.751, "generate": 126.587, "upscale": 0},
+    "10/1080p": {"condition": 0.751, "generate": 126.838, "upscale": 12.009},
+    "15/720p": {"condition": 0.751, "generate": 213.144, "upscale": 0},
+    "15/1080p": {"condition": 0.751, "generate": 214.879, "upscale": 16.761}
+  },
+  "6000-maxq": {
+    "5/720p": {"condition": 1.253, "generate": 69.068, "upscale": 0},
+    "5/1080p": {"condition": 0.751, "generate": 67.569, "upscale": 11.012},
+    "10/720p": {"condition": 0.751, "generate": 174.416, "upscale": 0},
+    "10/1080p": {"condition": 0.751, "generate": 174.923, "upscale": 21.024},
+    "15/720p": {"condition": 0.751, "generate": 300.311, "upscale": 0},
+    "15/1080p": {"condition": 0.751, "generate": 300.801, "upscale": 30.033}
+  }
+}

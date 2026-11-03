@@ -31,6 +31,7 @@ def source(value):
 class TaskTrace:
     def __init__(self):
         self.started = time.monotonic()
+        self.received_at = datetime.now(timezone.utc)
         self.ident = None
         self.status = 'unvalidated'
         self.error = None
@@ -87,7 +88,8 @@ class TaskTrace:
                    'callback': self.callback, 'total_s': round(time.monotonic() - self.started, 3),
                    'stages_s': {k: round(v, 3) for k, v in self.times.items()},
                    'generation': self.metrics, 'request': self.request, 'producer': self.producer,
-                   'finished_at': datetime.now(timezone.utc).isoformat()}
+                   'finished_at': datetime.now(timezone.utc).isoformat(),
+                   **getattr(self, 'annotations', {})}
         LOG.info('timing task=%s status=%s error=%s total_s=%.3f sqs_deleted=%s callback=%s details=%s',
                  self.ident, self.status, self.error, summary['total_s'], self.deleted, self.callback,
                  json.dumps({k: v for k, v in summary.items() if k not in {'generation', 'request'}},

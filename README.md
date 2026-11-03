@@ -11,6 +11,7 @@
 - [Wan 对照检查](docs/WAN_PARITY_AUDIT.md)：部署成本、已补项和剩余多机运行边界。
 - [Supervisor 运维](docs/SUPERVISOR.md)：启动、停止、日志筛选、机器标识、状态字段和故障恢复。
 - [双卡流水线](docs/DUAL_GPU.md)：GPU 分工和本地超分。
+- [本地排队模拟](docs/LOCAL_SIMULATOR.md)：真实 SQS/S3、无模型、按两台实测时长模拟生成与超分，统计50单排队。
 
 已选路线：复用 H3EROS 的 Diffusers 权重转换思路；条件编码也由自己部署，不调用公共 Space。当前双卡路线使用 INT8WO，关闭额外 Turbo LoRA、AoTI 和提示词自动改写。
 

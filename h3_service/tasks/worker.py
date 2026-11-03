@@ -119,7 +119,7 @@ class Worker:
                     polled = time.monotonic()
                     messages = self.sqs.receive_message(QueueUrl=self.settings.queue_url, MaxNumberOfMessages=1,
                         WaitTimeSeconds=20, VisibilityTimeout=self.settings.visibility,
-                        MessageSystemAttributeNames=['ApproximateReceiveCount']).get('Messages', [])
+                        MessageSystemAttributeNames=['ApproximateReceiveCount', 'SentTimestamp']).get('Messages', [])
                     if messages:
                         LOG.info('SQS receive complete count=%s elapsed_s=%.3f', len(messages), time.monotonic() - polled)
                     elif time.monotonic() - last_idle >= 60:
@@ -164,6 +164,16 @@ class Worker:
         if self.cancelled.is_set():
             raise LeaseLost('worker stopped or lease uncertain')
 
+    def new_child(self):
+        return Worker(self.settings, self.store, self.sqs, self.engine)
+
+    def download_input(self, url, path):
+        download(url, path, self.settings.image_hosts)
+
+    def decorate_state(self, state, trace):
+        """Optional runner annotations; production state is unchanged."""
+        return
+
     def run_pipeline(self):
         from concurrent.futures import ThreadPoolExecutor
         self.active_tasks = []
@@ -196,7 +206,7 @@ class Worker:
                 try:
                     raw_messages = self.sqs.receive_message(QueueUrl=self.settings.queue_url,
                         MaxNumberOfMessages=1, WaitTimeSeconds=5, VisibilityTimeout=self.settings.visibility,
-                        MessageSystemAttributeNames=['ApproximateReceiveCount']).get('Messages', [])
+                        MessageSystemAttributeNames=['ApproximateReceiveCount', 'SentTimestamp']).get('Messages', [])
                 except Exception as exc:
                     LOG.error('pipeline queue poll failed details=%s', json.dumps(details(exc)))
                     self.stop.wait(5)
@@ -217,7 +227,7 @@ class Worker:
                             ReceiptHandle=raw['ReceiptHandle'], VisibilityTimeout=30)
                         LOG.info('duplicate active delivery deferred task=%s', ident)
                         continue
-                    child = Worker(self.settings, self.store, self.sqs, self.engine)
+                    child = self.new_child()
                     child.stop, child.cancelled = self.stop, self.cancelled
                     child.ready = True
                     self.received_messages += 1
@@ -225,6 +235,7 @@ class Worker:
 
     def handle(self, message):
         trace = TaskTrace()
+        trace.sqs_sent_ms = message.get('Attributes', {}).get('SentTimestamp')
         provenance = attempt()
         trace.producer = provenance
         token = task_context.set(provenance)
@@ -310,6 +321,7 @@ class Worker:
                     if 'generate' in state['timing'] or 'condition' in state['timing']:
                         state['timing'] = compact_timing(state['timing'])
                     state['timing']['task_total_s'] = round(time.monotonic() - started, 3)
+                self.decorate_state(state, trace)
                 with trace.measure('status_write'):
                     self.store.write(state)
                 trace.status, trace.error = state['status'], state.get('error')
@@ -353,7 +365,7 @@ class Worker:
                 # persisted upload attempt, avoiding a guaranteed missing-object GET per task.
                 recover_upload = bool(state.get('upload_started')) or state.get('stage') == 'upload'
                 persist(status='pending', stage='recovery', upload_started=recover_upload)
-                stamp = fingerprint(requested, state['seed'])
+                stamp = getattr(self.engine, 'fingerprint', fingerprint)(requested, state['seed'])
                 if recover_upload:
                     LOG.info('upload recovery check start task=%s', ident)
                 with trace.measure('upload_recovery'):
@@ -428,7 +440,7 @@ class Worker:
                                          'first' if path == first else 'last', attempt + 1)
                                 transfer_started = time.monotonic()
                                 with trace.measure('download_first' if path == first else 'download_last'):
-                                    download(url, path, self.settings.image_hosts)
+                                    self.download_input(url, path)
                                 LOG.info('image download complete task=%s frame=%s elapsed_s=%.3f bytes=%s',
                                          ident, 'first' if path == first else 'last', time.monotonic() - transfer_started, path.stat().st_size)
                                 trace.failed_stage = None  # A successful retry resolves earlier attempt failures.
@@ -487,6 +499,8 @@ class Worker:
             result = {'seed': state['seed'], 'width': width, 'height': height, 'num_frames': frames, 'fps': 24,
                       'actual_duration': frames / 24, 'audio_present': request.audio, 'model': metrics['model'],
                       'producer': trace.producer}
+            if metrics.get('simulation'):
+                result['simulation'] = True
             local_upscale = request.resolution == '1080p' and self.settings.model_lifetime == 'dual_gpu'
             if local_upscale:
                 result.update(width=sr['width'], height=sr['height'], upscaled=True)
