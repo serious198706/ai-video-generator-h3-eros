@@ -89,12 +89,16 @@ def main():
     try:
         saved = bootstrap(Settings().region, force=force, save=save)
         verify_queue(Settings())
+        if os.getenv('H3_DYNAMODB_TABLE'):
+            from h3_control.store import Control
+            control = Control.from_env(Settings().region)
+            control.pool()
     except Exception as exc:
         code = getattr(exc, 'response', {}).get('Error', {}).get('Code', type(exc).__name__)
         print(f'AWS credential/queue check failed ({code}); models were not loaded. '
               'Supply credentials through the hidden prompt, AWS profile or process environment.', file=sys.stderr)
         return 1
-    print('AWS STS and configured queue checks passed; S3 access is checked when used.', flush=True)
+    print('AWS STS, queue and configured DynamoDB read checks passed; S3 access is checked when used.', flush=True)
     if not arguments:
         print('Credentials saved (mode 600).' if saved else 'Credential provider validated; no file written.', flush=True)
         return 0

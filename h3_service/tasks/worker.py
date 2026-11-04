@@ -85,11 +85,23 @@ class Worker:
         return True
 
     def run(self):
+        control = getattr(self.store, 'control', None)
+        control_stop = threading.Event()
+        control_thread = None
         try:
             # Also protect direct uvicorn launches that bypass start.sh.
             from h3_service.aws_setup import verify_credentials, verify_queue
             verify_credentials(self.settings.region)
             verify_queue(self.settings, self.sqs)
+            if control:
+                if self.settings.model_lifetime != 'dual_gpu':
+                    raise ValueError('DynamoDB control requires dual_gpu (local upscale)')
+                if control.lease_seconds <= 2 * self.settings.heartbeat:
+                    raise ValueError('H3_TASK_LEASE_SECONDS must exceed twice SQS_HEARTBEAT_SECONDS')
+                control.pool()  # Fail fast before model loading if table/key/access is invalid.
+                from h3_service.identity import producer
+                identity = producer()
+                control.heartbeat(identity['worker_id'], identity['run_id'], False)
             LOG.info('AWS STS and configured queue checks passed; starting model initialization')
             original_progress = self.engine.progress if hasattr(self.engine, 'progress') else None
             if original_progress is not None:
@@ -101,6 +113,26 @@ class Worker:
             if original_progress is not None:
                 self.engine.progress = original_progress
             self.ready = True
+            if control:
+                control.heartbeat(identity['worker_id'], identity['run_id'], True)
+                def control_loop():
+                    while not control_stop.is_set():
+                        try:
+                            control.heartbeat(identity['worker_id'], identity['run_id'],
+                                              self.ready and self.accepting and not self.stop.is_set())
+                        except Exception as exc:
+                            LOG.error('control heartbeat/outbox failed type=%s; admission disabled', type(exc).__name__)
+                            self.error = 'control_unavailable'
+                            self.ready = False
+                            self.stop.set()
+                            return
+                        try:
+                            control.dispatch(self.sqs)
+                        except Exception as exc:
+                            LOG.error('outbox retry pending type=%s; durable tasks retained', type(exc).__name__)
+                        control_stop.wait(20)
+                control_thread = threading.Thread(target=control_loop, name='h3-control', daemon=True)
+                control_thread.start()
             LOG.info('worker ready; model initialization complete; waiting for SQS tasks')
             self.stage = 'idle'
             last_idle = time.monotonic()
@@ -156,6 +188,13 @@ class Worker:
             LOG.error('worker initialization failed details=%s', json.dumps(diagnostic))
         finally:
             self.ready = False
+            control_stop.set()
+            if control_thread:
+                control_thread.join(timeout=35)
+                try:
+                    control.heartbeat(identity['worker_id'], identity['run_id'], False)
+                except Exception as exc:
+                    LOG.warning('control offline update failed type=%s; heartbeat will expire', type(exc).__name__)
             close = getattr(self.engine, 'close', None)
             if close:
                 close()
@@ -278,6 +317,11 @@ class Worker:
         ident, request = envelope.task_id, envelope.request
         trace.accept(ident, request, message.get('Attributes', {}).get('ApproximateReceiveCount', '1'))
         task_context.set({**trace.producer, 'task_id': ident})
+        if getattr(self.store, 'control', None) and not self.store.claim(ident, trace.producer):
+            self.sqs.change_message_visibility(QueueUrl=self.settings.queue_url,
+                ReceiptHandle=message['ReceiptHandle'], VisibilityTimeout=30)
+            LOG.info('task leased by another attempt; delivery deferred task=%s', ident)
+            return
         if request.resolution == '1080p' and self.settings.model_lifetime != 'dual_gpu' and not self.settings.upscale_queue_url:
             LOG.error('1080p task blocked task=%s: H3_UPSCALE_QUEUE_URL is missing; '
                       'configure the dedicated upscale queue and restart H3; message retained', ident)
@@ -377,7 +421,8 @@ class Worker:
                         self.handoff_upscale(state, result, persist)
                     else:
                         persist(status='succeeded', stage='complete', **final_result(result, state), video_url=self.store.video_url(ident))
-                elif int(message.get('Attributes', {}).get('ApproximateReceiveCount', '1')) >= self.settings.max_receive:
+                elif int(state.get('attempt_count') if getattr(self.store, 'control', None)
+                         else message.get('Attributes', {}).get('ApproximateReceiveCount', '1')) >= self.settings.max_receive:
                     LOG.warning('task receive limit reached task=%s limit=%s; marking failed without generation', ident, self.settings.max_receive)
                     persist(status='failed', error='poisoned', stage='complete')
                 else:
@@ -505,7 +550,8 @@ class Worker:
             if local_upscale:
                 result.update(width=sr['width'], height=sr['height'], upscaled=True)
             status_timing = compact_timing(metrics['timing'])
-            persist(stage='upload', timing=status_timing, producer=trace.producer, upload_started=True)
+            artifact = {'video_object_key': self.store.attempt_key(ident)} if getattr(self.store, 'control', None) else {}
+            persist(stage='upload', timing=status_timing, producer=trace.producer, upload_started=True, **artifact)
             # Transport exceptions propagate: leave message unacked for recovery/retry.
             self.stage = 'upload'
             upload_started = time.monotonic()

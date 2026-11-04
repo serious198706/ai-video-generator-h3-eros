@@ -17,6 +17,9 @@ if [[ "${H3_REINSTALL:-0}" == 1 || ! -f "$H3_VENV_DIR/.h3-dependencies" || "$(ca
 fi
 "$H3_VENV_DIR/bin/python" -m pip check
 if [[ "${H3_AWS_SETUP:-1}" == 1 ]]; then ./setup-aws.sh; fi
+if [[ -n "${H3_DYNAMODB_TABLE:-}" ]]; then
+  "$H3_VENV_DIR/bin/python" -m h3_control.cli check
+fi
 "$H3_VENV_DIR/bin/python" -m h3_service.check_runtime
 "$H3_VENV_DIR/bin/python" -m h3_service.download_models
 if [[ "${H3_MODEL_LIFETIME:-resident}" == dual_gpu ]]; then

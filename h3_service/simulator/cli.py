@@ -83,6 +83,8 @@ def submit(settings, args):
     settings.validate_cloud()
     s3, queue = clients(settings)
     store = Store(settings, s3)
+    if store.control:
+        raise ValueError('DynamoDB mode requires submission through POST /v1/generate for atomic admission')
     combinations = [(duration, resolution) for duration in args.durations for resolution in args.resolutions]
     tasks = []
     for i in range(args.count):

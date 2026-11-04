@@ -27,6 +27,17 @@ def clients(settings):
 class Store:
     def __init__(self, settings, s3):
         self.settings, self.s3 = settings, s3
+        from h3_control.store import Control
+        self.control = Control.from_env(settings.region)
+
+    def claim(self, ident, provenance):
+        if not self.control:
+            return True
+        return self.control.claim(ident, provenance['attempt_id'], provenance['worker_id'], provenance['run_id'])
+
+    def attempt_key(self, ident):
+        from h3_service.identity import task_context
+        return self.settings.prefix.strip('/') + '/' + ident + '/' + task_context.get()['attempt_id'] + '.mp4'
 
     def key(self, ident, video=False):
         task_id(ident)
@@ -35,6 +46,9 @@ class Store:
         return '/'.join(part for part in (prefix.strip('/'), tail) if part)
 
     def read(self, ident):
+        task_id(ident)
+        if self.control:
+            return self.control.read(ident)
         try:
             response = resource_call(self.s3, 'get_object', Bucket=self.settings.bucket, Key=self.key(ident))
         except self.s3.exceptions.NoSuchKey:
@@ -47,6 +61,9 @@ class Store:
 
     def write(self, state):
         state['updated_at'] = now()
+        if self.control:
+            from h3_service.identity import task_context
+            return self.control.write(state, task_context.get()['attempt_id'])
         resource_call(self.s3, 'put_object', Bucket=self.settings.bucket, Key=self.key(state['task_id']),
                            Body=json.dumps(state, ensure_ascii=False, allow_nan=False).encode(),
                            ContentType='application/json', CacheControl='no-store')
@@ -61,13 +78,19 @@ class Store:
                     'task-id': ident, 'fingerprint': fingerprint}
         if sum(len(k) + len(v.encode()) for k, v in metadata.items()) > 1900:
             raise ValueError('result metadata too large')
-        self.s3.upload_file(str(path), self.settings.bucket, self.native_key(ident) if native else self.key(ident, True),
+        # Immutable per-attempt objects fence uploads by an expired worker. Only
+        # the lease owner can publish its object key as the final database result.
+        video_key = self.attempt_key(ident) if self.control else self.key(ident, True)
+        self.s3.upload_file(str(path), self.settings.bucket, self.native_key(ident) if native else video_key,
                             ExtraArgs={'ContentType': 'video/mp4', 'Metadata': metadata})
 
     def recover(self, ident, fingerprint, *, native=False):
         # GET has a typed NoSuchKey error, unlike HEAD's generic 404.
         try:
-            response = resource_call(self.s3, 'get_object', Bucket=self.settings.bucket, Key=self.native_key(ident) if native else self.key(ident, True), Range='bytes=0-0')
+            video_key = (self.read(ident) or {}).get('video_object_key') if self.control else self.key(ident, True)
+            if not native and not video_key:
+                return None
+            response = resource_call(self.s3, 'get_object', Bucket=self.settings.bucket, Key=self.native_key(ident) if native else video_key, Range='bytes=0-0')
         except self.s3.exceptions.NoSuchKey:
             return None
         response['Body'].close()
@@ -80,4 +103,7 @@ class Store:
         return result
 
     def video_url(self, ident):
-        return self.settings.public_base.rstrip('/') + '/' + quote(self.key(ident, True), safe='/')
+        key = (self.read(ident) or {}).get('video_object_key') if self.control else self.key(ident, True)
+        if not key:
+            raise ValueError('video object key missing')
+        return self.settings.public_base.rstrip('/') + '/' + quote(key, safe='/')
